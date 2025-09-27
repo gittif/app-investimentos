@@ -1,4 +1,5 @@
-# app.py — v3.1 (PIN, Dashboards, Edição inline de Movimentos, fixes yfinance)
+
+# app.py — v3.2 (correções Movimentos + tamanho dos gráficos)
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -10,9 +11,9 @@ import yfinance as yf
 # ---------------------- Config ----------------------
 DB_PATH = "invest.db"
 SEED_PATH = "seed_investimentos.csv"
-REQUIRE_PIN = os.getenv("APP_PIN", "1234")  # defina nos secrets do Streamlit Cloud, se quiser
+REQUIRE_PIN = os.getenv("APP_PIN", "1234")
 
-st.set_page_config(page_title="Investimentos – v3.1", page_icon="📈", layout="wide")
+st.set_page_config(page_title="Investimentos – v3.2", page_icon="📈", layout="wide")
 
 # ---------------------- Auth (PIN simples) ----------------------
 if "authed" not in st.session_state:
@@ -222,7 +223,7 @@ conn = get_conn()
 create_table(conn)
 seed_if_empty(conn)
 
-st.title("📊 Controle de Investimentos – v3.1")
+st.title("📊 Controle de Investimentos – v3.2")
 
 tab1, tab2, tab3, tab4, tab5 = st.tabs(["➕ Novo", "📋 Movimentos", "📊 Dashboards", "📦 Posições", "✏️ Editar/Excluir"])
 
@@ -240,7 +241,7 @@ with tab1:
         compra_venda = st.selectbox("Operação", ["Compra", "Venda"])
         onde = st.text_input("Onde (corretora/plataforma)")
         tipo = st.text_input("Tipo (ex: Brasil Ações, EUA Ações, FII, ETF)")
-        country = st.text_input("País", value="Brasil")
+        country = st.selectbox("País", ["Brasil","USA","Crypto"], index=0)
         categoria = st.text_input("Categoria (ex: RV, RF, FII, ETF)", value="RV")
         obs = st.text_area("Observações")
 
@@ -271,7 +272,7 @@ with tab1:
             insert_movimento(conn, row)
             st.success(f"Movimento salvo para {row['ticket']} em {row['data']}.")
 
-# ---- Movimentos (com edição inline)
+# ---- Movimentos (com edição inline, incluindo País)
 with tab2:
     st.subheader("Histórico de movimentos")
     df = load_df(conn)
@@ -298,12 +299,13 @@ with tab2:
 
     st.caption("✅ Edite diretamente as células e clique em **Salvar alterações**.")
     edited = st.data_editor(
-        fdf[['id','data','ticket','nome','preco','quantidade','valor_investido','compra_venda','onde','tipo','categoria','obs']],
+        fdf[['id','data','ticket','nome','preco','quantidade','valor_investido','compra_venda','onde','tipo','country','categoria','obs']],
         num_rows="fixed",
         column_config={
             "id": st.column_config.NumberColumn("id", disabled=True),
             "data": st.column_config.DateColumn("data"),
             "compra_venda": st.column_config.SelectboxColumn("compra_venda", options=["Compra","Venda"]),
+            "country": st.column_config.SelectboxColumn("País", options=["Brasil","USA","Crypto"]),
         },
         use_container_width=True
     )
@@ -313,11 +315,14 @@ with tab2:
         for _, row in merged.iterrows():
             orig = fdf[fdf['id']==row['id']].iloc[0]
             updates = {}
-            for col in ['data','ticket','nome','preco','quantidade','compra_venda','onde','tipo','categoria','obs']:
+            for col in ['data','ticket','nome','preco','quantidade','compra_venda','onde','tipo','country','categoria','obs']:
                 new_val = row[col]
                 old_val = orig[col]
                 if col == 'data':
-                    new_val = pd.to_datetime(new_val).strftime("%Y-%m-%d")
+                    new_val = pd.to_datetime(new_val, errors='coerce')
+                    if pd.isna(new_val):
+                        continue  # pula se data inválida
+                    new_val = new_val.strftime("%Y-%m-%d")
                     old_val = pd.to_datetime(old_val).strftime("%Y-%m-%d")
                 if str(new_val) != str(old_val):
                     updates[col] = new_val
@@ -338,15 +343,14 @@ with tab2:
         st.success("Alterações salvas.")
         st.rerun()
 
+    # Export
     exp1, exp2 = st.columns(2)
     with exp1:
-        st.download_button("⬇️ CSV filtrado", data=edited.to_csv(index=False).encode('utf-8'),
-                           file_name="movimentos_filtrado.csv", mime="text/csv")
+        st.download_button("⬇️ CSV filtrado", data=edited.to_csv(index=False).encode('utf-8'), file_name="movimentos_filtrado.csv", mime="text/csv")
     with exp2:
-        st.download_button("⬇️ Backup completo (CSV)", data=df.to_csv(index=False).encode('utf-8'),
-                           file_name="movimentos_backup_completo.csv", mime="text/csv")
+        st.download_button("⬇️ Backup completo (CSV)", data=df.to_csv(index=False).encode('utf-8'), file_name="movimentos_backup_completo.csv", mime="text/csv")
 
-# ---- Dashboards
+# ---- Dashboards (reduzir tamanho dos gráficos)
 with tab3:
     st.subheader("Dashboards")
     df = load_df(conn)
@@ -364,13 +368,13 @@ with tab3:
         by_onde = ddf.pivot_table(index='onde', values='valor_investido', aggfunc='sum').reset_index().sort_values('valor_investido', ascending=False)
         st.dataframe(by_onde, use_container_width=True)
         if not by_onde.empty:
-            fig_onde, ax_onde = plt.subplots()
+            fig_onde, ax_onde = plt.subplots(figsize=(6,3))
             ax_onde.bar(by_onde['onde'].astype(str), by_onde['valor_investido'])
             ax_onde.set_title("Aporte líquido por corretora (R$)")
             ax_onde.set_xlabel("Corretora/Plataforma")
             ax_onde.set_ylabel("R$")
             plt.xticks(rotation=45, ha='right')
-            st.pyplot(fig_onde)
+            st.pyplot(fig_onde, use_container_width=False)
 
         st.markdown("### Por país (BRL) + USD para USA")
         by_country_brl = ddf.pivot_table(index='country_norm', values='valor_investido', aggfunc='sum').reset_index().sort_values('valor_investido', ascending=False)
@@ -382,12 +386,12 @@ with tab3:
 
         st.dataframe(by_country_brl.rename(columns={'country_norm':'País', 'valor_investido':'Aporte (BRL)'}), use_container_width=True)
         if not by_country_brl.empty:
-            fig_cty, ax_cty = plt.subplots()
+            fig_cty, ax_cty = plt.subplots(figsize=(6,3))
             ax_cty.bar(by_country_brl['country_norm'].astype(str), by_country_brl['valor_investido'])
             ax_cty.set_title("Aporte líquido por país (R$)")
             ax_cty.set_xlabel("País")
             ax_cty.set_ylabel("R$")
-            st.pyplot(fig_cty)
+            st.pyplot(fig_cty, use_container_width=False)
 
         st.markdown("---")
         st.markdown("### Detalhe – Brazil")
@@ -433,16 +437,16 @@ with tab4:
             st.dataframe(pos[show_cols], use_container_width=True)
 
             top = pos.sort_values('pnl_brl', ascending=False).head(10)
-            fig1, ax1 = plt.subplots()
+            fig1, ax1 = plt.subplots(figsize=(6,3))
             ax1.barh(top['ticket'], top['pnl_brl'])
             ax1.set_title('Top P&L (BRL)')
             ax1.set_xlabel('BRL')
             ax1.set_ylabel('Ticker')
-            st.pyplot(fig1)
+            st.pyplot(fig1, use_container_width=False)
         else:
             st.info("Não foi possível calcular posições ainda.")
 
-# ---- Editar/Excluir (formulário)
+# ---- Editar/Excluir
 with tab5:
     st.subheader("Editar ou excluir movimentos (modo formulário)")
     df = load_df(conn)
@@ -454,15 +458,20 @@ with tab5:
         st.write("Registro atual:")
         st.json(reg)
 
+        # Corrigir erro quando a data vier vazia/NaT
+        _safe = pd.to_datetime(reg['data'], errors='coerce')
+        if pd.isna(_safe):
+            _safe = datetime.today()
+
         with st.expander("Editar campos"):
-            e_data = st.date_input("Data", value=pd.to_datetime(reg['data']))
+            e_data = st.date_input("Data", value=_safe)
             e_preco = st.number_input("Preço", value=float(reg['preco']), step=0.01)
             e_quantidade = st.number_input("Quantidade", value=float(reg['quantidade']), step=1.0)
             e_compra_venda = st.selectbox("Operação", ["Compra","Venda"], index=0 if reg['compra_venda']=="Compra" else 1)
             e_onde = st.text_input("Onde", value=reg.get('onde') or "")
             e_tipo = st.text_input("Tipo", value=reg.get('tipo') or "")
             e_obs = st.text_area("Observações", value=reg.get('obs') or "")
-            e_country = st.text_input("País", value=reg.get('country') or "Brasil")
+            e_country = st.selectbox("País", ["Brasil","USA","Crypto"], index=0 if (reg.get('country') or "Brasil")=="Brasil" else (1 if (reg.get('country') or "")=="USA" else 2))
             e_categoria = st.text_input("Categoria", value=reg.get('categoria') or "RV")
 
             if st.button("Salvar edição"):
@@ -487,8 +496,8 @@ with tab5:
                 st.success("Registro atualizado.")
                 st.rerun()
 
-    st.divider()
-    if st.button("🗑️ Excluir registro selecionado"):
-        delete_movimento(conn, int(row))
-        st.warning("Registro excluído.")
-        st.rerun()
+        st.divider()
+        if st.button("🗑️ Excluir registro selecionado"):
+            delete_movimento(conn, int(row))
+            st.warning("Registro excluído.")
+            st.rerun()
