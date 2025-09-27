@@ -24,7 +24,7 @@ if not st.session_state.authed:
         if st.button("Entrar"):
             if pin == REQUIRE_PIN:
                 st.session_state.authed = True
-                st.experimental_rerun()
+                st.rerun()
             else:
                 st.error("PIN incorreto.")
     st.stop()
@@ -426,10 +426,10 @@ with tab5:
                 }
                 update_movimento(conn, int(row), updates)
                 st.success("Registro atualizado.")
-                st.experimental_rerun()
+                st.rerun()
 
     st.divider()
     if st.button("🗑️ Excluir registro selecionado"):
         delete_movimento(conn, int(row))
         st.warning("Registro excluído.")
-        st.experimental_rerun()
+        st.rerun()
