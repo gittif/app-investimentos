@@ -332,6 +332,7 @@ with tab2:
         st.download_button("⬇️ Backup completo (CSV)", data=df.to_csv(index=False).encode('utf-8'), file_name="movimentos_backup_completo.csv", mime="text/csv")
 
 # ---- Dashboards (sem gráficos + conversão BRL/USD)
+# ---- Dashboards (sem gráficos + conversão BRL/USD com override manual) ----
 with tab3:
     st.subheader("Dashboards")
     df = load_df(conn)
@@ -341,40 +342,58 @@ with tab3:
         ddf = df.copy()
         ddf['country_norm'] = ddf['country'].apply(norm_country)
 
-        usd_brl = get_usd_brl()
-        st.caption(f"USD/BRL usado: {usd_brl:,.4f}" if pd.notna(usd_brl) else "USD/BRL indisponível no momento.")
+        fx_auto = get_usd_brl()
+        col_fx1, col_fx2 = st.columns([1,2])
+        with col_fx1:
+            use_manual_default = pd.isna(fx_auto)
+            use_manual = st.toggle("Usar cotação manual", value=use_manual_default, help="Se o yfinance estiver fora, ative e digite a cotação.")
+        with col_fx2:
+            fx_init = float(fx_auto) if pd.notna(fx_auto) else 5.00
+            fx_manual = st.number_input("USD/BRL", value=fx_init, step=0.01, format="%.4f", disabled=not use_manual)
+        usd_brl = fx_manual if use_manual else fx_auto
 
+        if pd.notna(usd_brl):
+            st.caption(f"USD/BRL em uso: {usd_brl:,.4f} ({'manual' if use_manual else 'yfinance'})")
+        else:
+            st.caption("USD/BRL indisponível no momento (defina manualmente para converter os valores de USA).")
+
+        # Para cada linha: USA = local em USD; BR = local em BRL; Crypto = BRL
         def split_values(row):
             country = row['country_norm']
             val = float(row['valor_investido']) if pd.notna(row['valor_investido']) else 0.0
-            if country == 'USA' and pd.notna(usd_brl) and usd_brl != 0:
-                return pd.Series({'valor_local': val, 'moeda_local': 'USD', 'valor_brl': val * usd_brl})
+            if country == 'USA':
+                brl = val * usd_brl if pd.notna(usd_brl) and usd_brl != 0 else np.nan
+                return pd.Series({'valor_local': val, 'moeda_local': 'USD', 'valor_brl': brl})
             else:
+                # Brasil e Crypto tratados como BRL
                 return pd.Series({'valor_local': val, 'moeda_local': 'BRL', 'valor_brl': val})
 
         ddf = pd.concat([ddf, ddf.apply(split_values, axis=1)], axis=1)
 
-        total_investido_brl = ddf['valor_brl'].sum()
+        # KPI principal (em BRL)
+        total_investido_brl = ddf['valor_brl'].sum(skipna=True)
         st.metric("Valor total investido (BRL)", f"{total_investido_brl:,.2f}")
 
+        # --- Por corretora/plataforma (com conversão)
         st.markdown("### Por corretora/plataforma (com conversão)")
-        by_onde_brl = ddf.groupby('onde', dropna=False)['valor_brl'].sum().reset_index().rename(columns={'valor_brl':'Aporte (BRL)'})
-        predominante = ddf.groupby(['onde','moeda_local'])['valor_local'].sum().reset_index()
+        by_onde_brl = ddf.groupby('onde', dropna=False)['valor_brl'].sum(min_count=1).reset_index().rename(columns={'valor_brl':'Aporte (BRL)'})
+        predominante = ddf.groupby(['onde','moeda_local'])['valor_local'].sum(min_count=1).reset_index()
         idx = predominante.groupby('onde')['valor_local'].idxmax()
         moeda_pred = predominante.loc[idx, ['onde','moeda_local']]
-        by_onde_local = ddf.groupby('onde')['valor_local'].sum().reset_index().rename(columns={'valor_local':'Aporte (Local)'})
+        by_onde_local = ddf.groupby('onde')['valor_local'].sum(min_count=1).reset_index().rename(columns={'valor_local':'Aporte (Local)'})
         table_onde = by_onde_brl.merge(by_onde_local, on='onde', how='left').merge(moeda_pred, on='onde', how='left')
         table_onde = table_onde.rename(columns={'moeda_local':'Moeda Local (predominante)'})
-        table_onde = table_onde.sort_values('Aporte (BRL)', ascending=False)
+        table_onde = table_onde.sort_values('Aporte (BRL)', ascending=False, na_position='last')
         st.dataframe(table_onde, use_container_width=True)
 
+        # --- Por país (Local vs BRL)
         st.markdown("### Por país (Local vs BRL)")
         by_country = ddf.groupby('country_norm').agg(
             aporte_local=('valor_local','sum'),
             aporte_brl=('valor_brl','sum'),
             moeda=('moeda_local', lambda x: x.value_counts().index[0] if len(x)>0 else 'BRL')
         ).reset_index().rename(columns={'country_norm':'País','aporte_local':'Aporte (Local)','aporte_brl':'Aporte (BRL)','moeda':'Moeda'})
-        by_country = by_country.sort_values('Aporte (BRL)', ascending=False)
+        by_country = by_country.sort_values('Aporte (BRL)', ascending=False, na_position='last')
         st.dataframe(by_country, use_container_width=True)
 
         st.markdown("---")
