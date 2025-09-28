@@ -39,7 +39,7 @@ def get_conn():
     return sqlite3.connect(DB_PATH, check_same_thread=False)
 
 def create_table(conn):
-    conn.execute(\"\"\"
+    conn.execute("""
     CREATE TABLE IF NOT EXISTS movimentos (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         data TEXT,
@@ -57,8 +57,9 @@ def create_table(conn):
         month INTEGER,
         year INTEGER
     );
-    \"\"\" )
+    """)
     conn.commit()
+
 
 def seed_if_empty(conn):
     cur = conn.execute("SELECT COUNT(*) FROM movimentos")
