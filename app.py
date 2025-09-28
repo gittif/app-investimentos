@@ -1,4 +1,4 @@
-# app.py — v3.3 (completo)
+# app.py — v3.3 (completo)Edite diretamente
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -279,51 +279,84 @@ with tab2:
     if filtro_onde:
         fdf = fdf[fdf['onde'].str.contains(filtro_onde, na=False, case=False)]
 
-    st.caption("✅ Edite diretamente as células e clique em **Salvar alterações**.")
-    edited = st.data_editor(
-        fdf[['id','data','ticket','nome','preco','quantidade','valor_investido','compra_venda','onde','tipo','country','categoria','obs']],
-        num_rows="fixed",
-        column_config={
-            "id": st.column_config.NumberColumn("id", disabled=True),
-            "data": st.column_config.DateColumn("data"),
-            "compra_venda": st.column_config.SelectboxColumn("compra_venda", options=["Compra","Venda"]),
-            "country": st.column_config.SelectboxColumn("País", options=["Brasil","USA","Crypto"]),
-        },
-        use_container_width=True
-    )
+  st.caption("✅ Edite diretamente as células e clique em **Salvar alterações**.")
 
-    if st.button("Salvar alterações"):
-        merged = edited.merge(fdf[['id']], on='id', how='left')
-        for _, row in merged.iterrows():
-            orig = fdf[fdf['id']==row['id']].iloc[0]
-            updates = {}
-            for col in ['data','ticket','nome','preco','quantidade','compra_venda','onde','tipo','country','categoria','obs']:
-                new_val = row[col]
-                old_val = orig[col]
-                if col == 'data':
-                    new_val = pd.to_datetime(new_val, errors='coerce')
-                    if pd.isna(new_val):
-                        continue
-                    new_val = new_val.strftime("%Y-%m-%d")
-                    old_val = pd.to_datetime(old_val).strftime("%Y-%m-%d")
-                if str(new_val) != str(old_val):
-                    updates[col] = new_val
-            if any(k in updates for k in ['preco','quantidade','compra_venda']):
-                preco = float(updates.get('preco', row['preco']))
-                qtd = float(updates.get('quantidade', row['quantidade']))
-                oper = updates.get('compra_venda', row['compra_venda'])
-                val = preco * qtd
-                if oper == 'Venda':
-                    val = -val
-                updates['valor_investido'] = float(val)
-            if 'data' in updates:
-                dt = pd.to_datetime(updates['data'])
-                updates['month'] = int(dt.month)
-                updates['year'] = int(dt.year)
-            if updates:
-                update_movimento(conn, int(row['id']), updates)
-        st.success("Alterações salvas.")
+# Adiciona coluna para marcação de exclusão (somente na visão)
+fdf_view = fdf[['id','data','ticket','nome','preco','quantidade','valor_investido',
+                'compra_venda','onde','tipo','country','categoria','obs']].copy()
+fdf_view.insert(1, "excluir", False)  # coluna de checkboxes logo após 'id'
+
+edited = st.data_editor(
+    fdf_view,
+    num_rows="fixed",
+    hide_index=True,
+    column_config={
+        "id": st.column_config.NumberColumn("id", disabled=True),
+        "excluir": st.column_config.CheckboxColumn("Excluir"),
+        "data": st.column_config.DateColumn("data"),
+        "compra_venda": st.column_config.SelectboxColumn("compra_venda", options=["Compra","Venda"]),
+        # 'onde' como dropdown com valores conhecidos (ainda é possível editar no formulário abaixo)
+        "onde": st.column_config.SelectboxColumn(
+            "onde",
+            options=sorted(list(set(df['onde'].dropna().tolist() + ["XP","Rico","Nubank","Clear","Avenue","Biscoint"])) )
+        ),
+        "country": st.column_config.SelectboxColumn("País", options=["Brasil","USA","Crypto"]),
+    },
+    use_container_width=True
+)
+with st.expander("Edição em massa de 'onde' (aplica no filtro atual)"):
+    novos = sorted(list(set(df['onde'].dropna())) + ["XP","Rico","Nubank","Clear","Avenue","Biscoint"])
+    novo_onde = st.selectbox("Definir 'onde' para TODAS as linhas filtradas:", options=novos)
+    if st.button("Aplicar 'onde' nas linhas filtradas"):
+        for rid in fdf['id'].tolist():
+            update_movimento(conn, int(rid), {"onde": novo_onde})
+        st.success(f"'onde' atualizado em {len(fdf)} linha(s).")
         st.rerun()
+
+
+# ----- salvar edições de células -----
+if st.button("Salvar alterações"):
+    merged = edited.merge(fdf[['id']], on='id', how='left')
+    for _, row in merged.iterrows():
+        orig = fdf[fdf['id']==row['id']].iloc[0]
+        updates = {}
+        for col in ['data','ticket','nome','preco','quantidade','compra_venda','onde','tipo','country','categoria','obs']:
+            new_val = row[col]
+            old_val = orig[col]
+            if col == 'data':
+                new_val = pd.to_datetime(new_val, errors='coerce')
+                if pd.isna(new_val):
+                    continue
+                new_val = new_val.strftime("%Y-%m-%d")
+                old_val = pd.to_datetime(old_val).strftime("%Y-%m-%d")
+            if str(new_val) != str(old_val):
+                updates[col] = new_val
+        if any(k in updates for k in ['preco','quantidade','compra_venda']):
+            preco = float(updates.get('preco', row['preco']))
+            qtd = float(updates.get('quantidade', row['quantidade']))
+            oper = updates.get('compra_venda', row['compra_venda'])
+            val = preco * qtd
+            if oper == 'Venda':
+                val = -val
+            updates['valor_investido'] = float(val)
+        if 'data' in updates:
+            dt = pd.to_datetime(updates['data'])
+            updates['month'] = int(dt.month)
+            updates['year'] = int(dt.year)
+        if updates:
+            update_movimento(conn, int(row['id']), updates)
+    st.success("Alterações salvas.")
+    st.rerun()
+
+# ----- exclusão em massa -----
+ids_excluir = edited.loc[edited['excluir']==True, 'id'].astype(int).tolist()
+if ids_excluir:
+    if st.button(f"🗑️ Excluir {len(ids_excluir)} linha(s) marcada(s)"):
+        for rid in ids_excluir:
+            delete_movimento(conn, rid)
+        st.warning(f"{len(ids_excluir)} linha(s) excluída(s).")
+        st.rerun()
+
 
     exp1, exp2 = st.columns(2)
     with exp1:
