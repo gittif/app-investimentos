@@ -1,12 +1,11 @@
-# app.py — v3.5.3
-# - `valor_investido` editável e salvo com prioridade se você alterar manualmente.
-# - Se você não alterar `valor_investido`, mas mudar `preco`/`quantidade`/`compra_venda`, o app recalcula.
+# app.py — v3.5.4
+# Fix: normalização de números vindos do editor (remove vírgulas de milhar).
+# - `valor_investido` editável e salvo com prioridade (sem recálculo se você alterar).
+# - Recalcula apenas quando você NÃO alterar `valor_investido` e mudar preco/quantidade/compra_venda.
 # - Exclusão por checkbox na aba Movimentos.
 # - Edição inline (inclui dropdown para `onde` e `País`) e edição em massa de `onde`.
-# - Dashboards sem gráficos, com conversão BRL/USD (yfinance) e opção de cotação manual.
+# - Dashboards sem gráficos, com conversão BRL/USD (yfinance) e opção manual.
 # - Posições com P&L em BRL.
-#
-# Dica: depois de atualizar no GitHub → no Streamlit use ⋮ → Clear cache → Rerun.
 
 import streamlit as st
 import pandas as pd
@@ -20,7 +19,7 @@ DB_PATH   = "invest.db"
 SEED_PATH = "seed_investimentos.csv"
 REQUIRE_PIN = os.getenv("APP_PIN", "1234")
 
-st.set_page_config(page_title="Controle de Investimentos – v3.5.3", page_icon="📊", layout="wide")
+st.set_page_config(page_title="Controle de Investimentos – v3.5.4", page_icon="📊", layout="wide")
 
 # ---------------------- Auth ----------------------
 if "authed" not in st.session_state:
@@ -219,7 +218,7 @@ conn = get_conn()
 create_table(conn)
 seed_if_empty(conn)
 
-st.title("Controle de Investimentos – v3.5.3")
+st.title("Controle de Investimentos – v3.5.4")
 
 tab1, tab2, tab3, tab4 = st.tabs(["➕ Novo", "📋 Movimentos", "📊 Dashboards", "📦 Posições"])
 
@@ -268,7 +267,7 @@ with tab1:
             insert_movimento(conn, row)
             st.success(f"Movimento salvo para {row['ticket']} em {row['data']}.")
 
-# ---- Movimentos (edição inline + País/onde + exclusão em massa)
+# ---- Movimentos
 with tab2:
     st.subheader("Histórico de movimentos")
     df = load_df(conn)
@@ -320,6 +319,20 @@ with tab2:
         key="mov_editor"
     )
 
+    # Função robusta para converter números vindos como string (remove vírgulas de milhar)
+    def to_float_safe(x):
+        if x is None:
+            return np.nan
+        if isinstance(x, (int, float, np.number)):
+            return float(x)
+        if isinstance(x, str):
+            s = x.strip().replace(" ", "").replace(",", "")  # remove milhar "1,234" -> "1234"
+            try:
+                return float(s)
+            except Exception:
+                return np.nan
+        return np.nan
+
     colA, colB, colC = st.columns([1,1,2])
     with colA:
         if st.button("💾 Salvar alterações", key="btn_save_inline"):
@@ -327,7 +340,8 @@ with tab2:
             for _, row in merged.iterrows():
                 orig = fdf[fdf['id']==row['id']].iloc[0]
                 updates = {}
-                for col in ['data','ticket','nome','preco','quantidade','valor_investido','compra_venda','onde','tipo','country','categoria','obs']:
+                for col in ['data','ticket','nome','preco','quantidade','valor_investido',
+                            'compra_venda','onde','tipo','country','categoria','obs']:
                     new_val = row[col]
                     old_val = orig[col]
                     if col == 'data':
@@ -340,12 +354,15 @@ with tab2:
                     if changed:
                         updates[col] = new_val
 
+                # Recalcular apenas se o usuário NÃO forneceu valor_investido
                 changed_inputs = any(k in updates for k in ['preco','quantidade','compra_venda'])
-                gave_value = ('valor_investido' in updates) and (not pd.isna(updates['valor_investido']))
+                gave_value = ('valor_investido' in updates) and (not pd.isna(to_float_safe(updates['valor_investido'])))
                 if changed_inputs and not gave_value:
-                    preco = float(updates.get('preco', row['preco'] if not pd.isna(row['preco']) else 0) or 0)
-                    qtd   = float(updates.get('quantidade', row['quantidade'] if not pd.isna(row['quantidade']) else 0) or 0)
+                    preco = to_float_safe(updates.get('preco', row['preco']))
+                    qtd   = to_float_safe(updates.get('quantidade', row['quantidade']))
                     oper  = updates.get('compra_venda', row['compra_venda'])
+                    if pd.isna(preco): preco = 0.0
+                    if pd.isna(qtd):   qtd   = 0.0
                     val = preco * qtd
                     if oper == 'Venda':
                         val = -val
@@ -359,13 +376,11 @@ with tab2:
                 if updates:
                     for num_col in ['preco','quantidade','valor_investido']:
                         if num_col in updates and updates[num_col] is not None and not pd.isna(updates[num_col]):
-                            try:
-                                updates[num_col] = float(updates[num_col])
-                            except Exception:
-                                pass
+                            updates[num_col] = to_float_safe(updates[num_col])
                     update_movimento(conn, int(row['id']), updates)
             st.success("Alterações salvas.")
             st.rerun()
+
     with colB:
         ids_excluir = edited.loc[edited['excluir']==True, 'id'].dropna().astype(int).tolist()
         if st.button(f"🗑️ Excluir selecionados ({len(ids_excluir)})", disabled=(len(ids_excluir)==0), key="btn_delete"):
@@ -373,10 +388,11 @@ with tab2:
                 delete_movimento(conn, rid)
             st.warning(f"{len(ids_excluir)} linha(s) excluída(s).")
             st.rerun()
+
     with colC:
         if st.button("☑️ Marcar/Desmarcar todos visíveis", key="btn_toggle_all"):
             edited['excluir'] = ~edited['excluir'].astype(bool)
-            st.session_state['mov_editor'] = edited  # best-effort
+            st.session_state['mov_editor'] = edited
             st.rerun()
 
     with st.expander("Edição em massa de 'onde' (aplica no filtro atual)"):
@@ -401,7 +417,7 @@ with tab2:
             file_name="movimentos_backup_completo.csv", mime="text/csv", key="dl_csv_full"
         )
 
-# ---- Dashboards (sem gráficos + conversão BRL/USD com override manual) ----
+# ---- Dashboards (sem gráficos + FX override) ----
 with tab3:
     st.subheader("Dashboards")
     df = load_df(conn)
