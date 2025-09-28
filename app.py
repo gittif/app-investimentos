@@ -1,4 +1,9 @@
-# app.py — v3.3 (completo)Edite diretamente
+# app.py — v3.4
+# - Movimentos: checkbox "Excluir" + exclusão em massa
+# - Movimentos: coluna "onde" como dropdown + edição em massa para linhas filtradas
+# - Dashboards: sem gráficos, com conversão BRL/USD e override manual
+# - Demais abas iguais à v3.3
+
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -11,7 +16,7 @@ DB_PATH = "invest.db"
 SEED_PATH = "seed_investimentos.csv"
 REQUIRE_PIN = os.getenv("APP_PIN", "1234")
 
-st.set_page_config(page_title="Controle de Investimentos – v3.3", page_icon="📊", layout="wide")
+st.set_page_config(page_title="Controle de Investimentos – v3.4", page_icon="📊", layout="wide")
 
 # ---------------------- Auth ----------------------
 if "authed" not in st.session_state:
@@ -34,7 +39,7 @@ def get_conn():
     return sqlite3.connect(DB_PATH, check_same_thread=False)
 
 def create_table(conn):
-    conn.execute("""
+    conn.execute(\"\"\"
     CREATE TABLE IF NOT EXISTS movimentos (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         data TEXT,
@@ -52,7 +57,7 @@ def create_table(conn):
         month INTEGER,
         year INTEGER
     );
-    """)
+    \"\"\" )
     conn.commit()
 
 def seed_if_empty(conn):
@@ -74,11 +79,11 @@ def load_df(conn):
     return pd.read_sql_query("SELECT * FROM movimentos ORDER BY datetime(data) ASC", conn, parse_dates=['data'])
 
 def insert_movimento(conn, row: dict):
-    conn.execute("""
+    conn.execute(\"\"\"
         INSERT INTO movimentos 
         (data, ticket, nome, preco, quantidade, valor_investido, compra_venda, onde, tipo, obs, country, categoria, month, year)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """, (
+    \"\"\", (
         row['data'], row['ticket'], row['nome'], row['preco'], row['quantidade'], row['valor_investido'],
         row['compra_venda'], row['onde'], row['tipo'], row['obs'], row['country'], row['categoria'],
         row['month'], row['year']
@@ -86,13 +91,15 @@ def insert_movimento(conn, row: dict):
     conn.commit()
 
 def update_movimento(conn, row_id: int, updates: dict):
-    sets = ", ".join([f"{k}=?" for k in updates.keys()])
+    if not updates: 
+        return
+    sets = \", \".join([f\"{k}=?\" for k in updates.keys()])
     vals = list(updates.values()) + [row_id]
-    conn.execute(f"UPDATE movimentos SET {sets} WHERE id=?", vals)
+    conn.execute(f\"UPDATE movimentos SET {sets} WHERE id=?\", vals)
     conn.commit()
 
 def delete_movimento(conn, row_id: int):
-    conn.execute("DELETE FROM movimentos WHERE id=?", (row_id,))
+    conn.execute(\"DELETE FROM movimentos WHERE id=?\", (row_id,))
     conn.commit()
 
 # ---------------------- Helpers ----------------------
@@ -205,7 +212,7 @@ conn = get_conn()
 create_table(conn)
 seed_if_empty(conn)
 
-st.title("Controle de Investimentos – v3.3")
+st.title("Controle de Investimentos – v3.4")
 
 tab1, tab2, tab3, tab4, tab5 = st.tabs(["➕ Novo", "📋 Movimentos", "📊 Dashboards", "📦 Posições", "✏️ Editar/Excluir"])
 
@@ -246,7 +253,7 @@ with tab1:
             "categoria": categoria.strip(),
         }
         row["month"] = pd.to_datetime(row["data"]).month
-        row["year"] = pd.to_datetime(row["data"]).year
+        row["year"]  = pd.to_datetime(row["data"]).year
 
         if row["ticket"] == "" or row["preco"] <= 0 or row["quantidade"] <= 0:
             st.error("Preencha Ticker, Preço (> 0) e Quantidade (> 0).")
@@ -254,7 +261,7 @@ with tab1:
             insert_movimento(conn, row)
             st.success(f"Movimento salvo para {row['ticket']} em {row['data']}.")
 
-# ---- Movimentos (edição inline + País dropdown)
+# ---- Movimentos (edição inline + País/onde + exclusão em massa)
 with tab2:
     st.subheader("Histórico de movimentos")
     df = load_df(conn)
@@ -279,92 +286,86 @@ with tab2:
     if filtro_onde:
         fdf = fdf[fdf['onde'].str.contains(filtro_onde, na=False, case=False)]
 
-  st.caption("✅ Edite diretamente as células e clique em **Salvar alterações**.")
+    st.caption("✅ Edite as células, marque 'Excluir' para remover linhas, e use os botões abaixo.")
 
-# Adiciona coluna para marcação de exclusão (somente na visão)
-fdf_view = fdf[['id','data','ticket','nome','preco','quantidade','valor_investido',
-                'compra_venda','onde','tipo','country','categoria','obs']].copy()
-fdf_view.insert(1, "excluir", False)  # coluna de checkboxes logo após 'id'
+    onde_options = sorted(list(set(df['onde'].dropna().tolist() + ["XP","Rico","Nubank","Clear","Avenue","Biscoint"])))
 
-edited = st.data_editor(
-    fdf_view,
-    num_rows="fixed",
-    hide_index=True,
-    column_config={
-        "id": st.column_config.NumberColumn("id", disabled=True),
-        "excluir": st.column_config.CheckboxColumn("Excluir"),
-        "data": st.column_config.DateColumn("data"),
-        "compra_venda": st.column_config.SelectboxColumn("compra_venda", options=["Compra","Venda"]),
-        # 'onde' como dropdown com valores conhecidos (ainda é possível editar no formulário abaixo)
-        "onde": st.column_config.SelectboxColumn(
-            "onde",
-            options=sorted(list(set(df['onde'].dropna().tolist() + ["XP","Rico","Nubank","Clear","Avenue","Biscoint"])) )
-        ),
-        "country": st.column_config.SelectboxColumn("País", options=["Brasil","USA","Crypto"]),
-    },
-    use_container_width=True
-)
-with st.expander("Edição em massa de 'onde' (aplica no filtro atual)"):
-    novos = sorted(list(set(df['onde'].dropna())) + ["XP","Rico","Nubank","Clear","Avenue","Biscoint"])
-    novo_onde = st.selectbox("Definir 'onde' para TODAS as linhas filtradas:", options=novos)
-    if st.button("Aplicar 'onde' nas linhas filtradas"):
-        for rid in fdf['id'].tolist():
-            update_movimento(conn, int(rid), {"onde": novo_onde})
-        st.success(f"'onde' atualizado em {len(fdf)} linha(s).")
+    fdf_view = fdf[['id','data','ticket','nome','preco','quantidade','valor_investido',
+                    'compra_venda','onde','tipo','country','categoria','obs']].copy()
+    fdf_view.insert(1, "excluir", False)
+
+    edited = st.data_editor(
+        fdf_view,
+        num_rows="fixed",
+        hide_index=True,
+        column_config={
+            "id": st.column_config.NumberColumn("id", disabled=True),
+            "excluir": st.column_config.CheckboxColumn("Excluir"),
+            "data": st.column_config.DateColumn("data"),
+            "compra_venda": st.column_config.SelectboxColumn("compra_venda", options=["Compra","Venda"]),
+            "onde": st.column_config.SelectboxColumn("onde", options=onde_options),
+            "country": st.column_config.SelectboxColumn("País", options=["Brasil","USA","Crypto"]),
+        },
+        use_container_width=True
+    )
+
+    if st.button("Salvar alterações"):
+        merged = edited.merge(fdf[['id']], on='id', how='left')
+        for _, row in merged.iterrows():
+            orig = fdf[fdf['id']==row['id']].iloc[0]
+            updates = {}
+            for col in ['data','ticket','nome','preco','quantidade','compra_venda','onde','tipo','country','categoria','obs']:
+                new_val = row[col]
+                old_val = orig[col]
+                if col == 'data':
+                    new_val = pd.to_datetime(new_val, errors='coerce')
+                    if pd.isna(new_val):
+                        continue
+                    new_val = new_val.strftime("%Y-%m-%d")
+                    old_val = pd.to_datetime(old_val).strftime("%Y-%m-%d")
+                if str(new_val) != str(old_val):
+                    updates[col] = new_val
+            if any(k in updates for k in ['preco','quantidade','compra_venda']):
+                preco = float(updates.get('preco', row['preco']))
+                qtd   = float(updates.get('quantidade', row['quantidade']))
+                oper  = updates.get('compra_venda', row['compra_venda'])
+                val = preco * qtd
+                if oper == 'Venda':
+                    val = -val
+                updates['valor_investido'] = float(val)
+            if 'data' in updates:
+                dt = pd.to_datetime(updates['data'])
+                updates['month'] = int(dt.month)
+                updates['year']  = int(dt.year)
+            if updates:
+                update_movimento(conn, int(row['id']), updates)
+        st.success("Alterações salvas.")
         st.rerun()
 
+    ids_excluir = edited.loc[edited['excluir']==True, 'id'].dropna().astype(int).tolist()
+    if ids_excluir:
+        if st.button(f"🗑️ Excluir {len(ids_excluir)} linha(s) marcada(s)"):
+            for rid in ids_excluir:
+                delete_movimento(conn, rid)
+            st.warning(f"{len(ids_excluir)} linha(s) excluída(s).")
+            st.rerun()
 
-# ----- salvar edições de células -----
-if st.button("Salvar alterações"):
-    merged = edited.merge(fdf[['id']], on='id', how='left')
-    for _, row in merged.iterrows():
-        orig = fdf[fdf['id']==row['id']].iloc[0]
-        updates = {}
-        for col in ['data','ticket','nome','preco','quantidade','compra_venda','onde','tipo','country','categoria','obs']:
-            new_val = row[col]
-            old_val = orig[col]
-            if col == 'data':
-                new_val = pd.to_datetime(new_val, errors='coerce')
-                if pd.isna(new_val):
-                    continue
-                new_val = new_val.strftime("%Y-%m-%d")
-                old_val = pd.to_datetime(old_val).strftime("%Y-%m-%d")
-            if str(new_val) != str(old_val):
-                updates[col] = new_val
-        if any(k in updates for k in ['preco','quantidade','compra_venda']):
-            preco = float(updates.get('preco', row['preco']))
-            qtd = float(updates.get('quantidade', row['quantidade']))
-            oper = updates.get('compra_venda', row['compra_venda'])
-            val = preco * qtd
-            if oper == 'Venda':
-                val = -val
-            updates['valor_investido'] = float(val)
-        if 'data' in updates:
-            dt = pd.to_datetime(updates['data'])
-            updates['month'] = int(dt.month)
-            updates['year'] = int(dt.year)
-        if updates:
-            update_movimento(conn, int(row['id']), updates)
-    st.success("Alterações salvas.")
-    st.rerun()
-
-# ----- exclusão em massa -----
-ids_excluir = edited.loc[edited['excluir']==True, 'id'].astype(int).tolist()
-if ids_excluir:
-    if st.button(f"🗑️ Excluir {len(ids_excluir)} linha(s) marcada(s)"):
-        for rid in ids_excluir:
-            delete_movimento(conn, rid)
-        st.warning(f"{len(ids_excluir)} linha(s) excluída(s).")
-        st.rerun()
-
+    with st.expander("Edição em massa de 'onde' (aplica no filtro atual)"):
+        novo_onde = st.selectbox("Definir 'onde' para TODAS as linhas filtradas:", options=onde_options)
+        if st.button("Aplicar 'onde' nas linhas filtradas"):
+            for rid in fdf['id'].tolist():
+                update_movimento(conn, int(rid), {"onde": novo_onde})
+            st.success(f"'onde' atualizado em {len(fdf)} linha(s).")
+            st.rerun()
 
     exp1, exp2 = st.columns(2)
     with exp1:
-        st.download_button("⬇️ CSV filtrado", data=edited.to_csv(index=False).encode('utf-8'), file_name="movimentos_filtrado.csv", mime="text/csv")
+        st.download_button("⬇️ CSV filtrado", data=edited.drop(columns=['excluir']).to_csv(index=False).encode('utf-8'),
+                           file_name="movimentos_filtrado.csv", mime="text/csv")
     with exp2:
-        st.download_button("⬇️ Backup completo (CSV)", data=df.to_csv(index=False).encode('utf-8'), file_name="movimentos_backup_completo.csv", mime="text/csv")
+        st.download_button("⬇️ Backup completo (CSV)", data=df.to_csv(index=False).encode('utf-8'),
+                           file_name="movimentos_backup_completo.csv", mime="text/csv")
 
-# ---- Dashboards (sem gráficos + conversão BRL/USD)
 # ---- Dashboards (sem gráficos + conversão BRL/USD com override manual) ----
 with tab3:
     st.subheader("Dashboards")
@@ -390,7 +391,6 @@ with tab3:
         else:
             st.caption("USD/BRL indisponível no momento (defina manualmente para converter os valores de USA).")
 
-        # Para cada linha: USA = local em USD; BR = local em BRL; Crypto = BRL
         def split_values(row):
             country = row['country_norm']
             val = float(row['valor_investido']) if pd.notna(row['valor_investido']) else 0.0
@@ -398,16 +398,13 @@ with tab3:
                 brl = val * usd_brl if pd.notna(usd_brl) and usd_brl != 0 else np.nan
                 return pd.Series({'valor_local': val, 'moeda_local': 'USD', 'valor_brl': brl})
             else:
-                # Brasil e Crypto tratados como BRL
                 return pd.Series({'valor_local': val, 'moeda_local': 'BRL', 'valor_brl': val})
 
         ddf = pd.concat([ddf, ddf.apply(split_values, axis=1)], axis=1)
 
-        # KPI principal (em BRL)
         total_investido_brl = ddf['valor_brl'].sum(skipna=True)
         st.metric("Valor total investido (BRL)", f"{total_investido_brl:,.2f}")
 
-        # --- Por corretora/plataforma (com conversão)
         st.markdown("### Por corretora/plataforma (com conversão)")
         by_onde_brl = ddf.groupby('onde', dropna=False)['valor_brl'].sum(min_count=1).reset_index().rename(columns={'valor_brl':'Aporte (BRL)'})
         predominante = ddf.groupby(['onde','moeda_local'])['valor_local'].sum(min_count=1).reset_index()
@@ -419,7 +416,6 @@ with tab3:
         table_onde = table_onde.sort_values('Aporte (BRL)', ascending=False, na_position='last')
         st.dataframe(table_onde, use_container_width=True)
 
-        # --- Por país (Local vs BRL)
         st.markdown("### Por país (Local vs BRL)")
         by_country = ddf.groupby('country_norm').agg(
             aporte_local=('valor_local','sum'),
@@ -473,7 +469,7 @@ with tab3:
                 ).reset_index().sort_values('aporte_brl', ascending=False)
                 st.dataframe(det, use_container_width=True)
 
-# ---- Posições
+# ---- Posições (mantém gráfico informativo)
 with tab4:
     st.subheader("Posições e P&L (valores em BRL)")
     df = load_df(conn)
