@@ -1,10 +1,11 @@
-# app.py — v3.5.4
-# Fix: normalização de números vindos do editor (remove vírgulas de milhar).
+# app.py — v3.5.5
+# Base: v3.5.4 do usuário + PREÇOS ATUAIS (yfinance) e comparação com preço médio.
 # - `valor_investido` editável e salvo com prioridade (sem recálculo se você alterar).
 # - Recalcula apenas quando você NÃO alterar `valor_investido` e mudar preco/quantidade/compra_venda.
 # - Exclusão por checkbox na aba Movimentos.
 # - Edição inline (inclui dropdown para `onde` e `País`) e edição em massa de `onde`.
 # - Dashboards sem gráficos, com conversão BRL/USD (yfinance) e opção manual.
+# - PREÇOS ATUAIS (yfinance) por ticker + comparação com preço médio (local).
 # - Posições com P&L em BRL.
 
 import streamlit as st
@@ -19,7 +20,7 @@ DB_PATH   = "invest.db"
 SEED_PATH = "seed_investimentos.csv"
 REQUIRE_PIN = os.getenv("APP_PIN", "1234")
 
-st.set_page_config(page_title="Controle de Investimentos – v3.5.4", page_icon="📊", layout="wide")
+st.set_page_config(page_title="Controle de Investimentos – v3.5.5", page_icon="📊", layout="wide")
 
 # ---------------------- Auth ----------------------
 if "authed" not in st.session_state:
@@ -137,14 +138,35 @@ def get_usd_brl():
     except Exception:
         return np.nan
 
+# --- NOVO: mapeamento simples para cripto
+def map_crypto_symbol(ticket: str):
+    t = ticket.strip().upper()
+    # Mais comuns, amplie se quiser:
+    common = {
+        "BTC": "BTC-USD",
+        "ETH": "ETH-USD",
+        "SOL": "SOL-USD",
+    }
+    return common.get(t, t)
+
 # ---------------------- Prices & Positions ----------------------
+# (alterada) guess_ticker_symbol para incluir cripto
 def guess_ticker_symbol(row):
     t = str(row.get('ticket','')).upper().strip()
     country = str(row.get('country','')).strip().lower()
     tipo = str(row.get('tipo','')).strip().lower()
+
+    # CRYPTO → usa par em USD para o Yahoo Finance
+    if 'crypto' in country or 'cripto' in country:
+        return map_crypto_symbol(t)
+
+    # Brasil → sufixo .SA
     if 'brasil' in country or 'b3' in tipo or 'fii' in tipo or 'brasil ações' in tipo:
-        if t.endswith('.SA'): return t
+        if t.endswith('.SA'):
+            return t
         return t + '.SA'
+
+    # EUA / outros → retorna como está
     return t
 
 def fetch_prices(tickers_unique):
@@ -218,7 +240,7 @@ conn = get_conn()
 create_table(conn)
 seed_if_empty(conn)
 
-st.title("Controle de Investimentos – v3.5.4")
+st.title("Controle de Investimentos – v3.5.5")
 
 tab1, tab2, tab3, tab4 = st.tabs(["➕ Novo", "📋 Movimentos", "📊 Dashboards", "📦 Posições"])
 
@@ -319,14 +341,14 @@ with tab2:
         key="mov_editor"
     )
 
-    # Função robusta para converter números vindos como string (remove vírgulas de milhar)
+    # Conversor robusto para números (remove vírgulas de milhar)
     def to_float_safe(x):
         if x is None:
             return np.nan
         if isinstance(x, (int, float, np.number)):
             return float(x)
         if isinstance(x, str):
-            s = x.strip().replace(" ", "").replace(",", "")  # remove milhar "1,234" -> "1234"
+            s = x.strip().replace(" ", "").replace(",", "")
             try:
                 return float(s)
             except Exception:
@@ -450,6 +472,9 @@ with tab3:
             if country == 'USA':
                 brl = val * usd_brl if pd.notna(usd_brl) and usd_brl != 0 else np.nan
                 return pd.Series({'valor_local': val, 'moeda_local': 'USD', 'valor_brl': brl})
+            elif country == 'Crypto':
+                brl = val * usd_brl if pd.notna(usd_brl) and usd_brl != 0 else np.nan
+                return pd.Series({'valor_local': val, 'moeda_local': 'USD', 'valor_brl': brl})
             else:
                 return pd.Series({'valor_local': val, 'moeda_local': 'BRL', 'valor_brl': val})
 
@@ -477,6 +502,56 @@ with tab3:
         ).reset_index().rename(columns={'country_norm':'País','aporte_local':'Aporte (Local)','aporte_brl':'Aporte (BRL)','moeda':'Moeda'})
         by_country = by_country.sort_values('Aporte (BRL)', ascending=False, na_position='last')
         st.dataframe(by_country, use_container_width=True)
+
+        # --- NOVO: PREÇOS ATUAIS + COMPARAÇÃO COM PREÇO MÉDIO ---
+        st.markdown("### Preços atuais (yfinance) e comparação com preço médio")
+
+        tmp_tickers = ddf.drop_duplicates('ticket')[['ticket','country','tipo']].copy()
+        tmp_tickers['ticker_fetch'] = tmp_tickers.apply(guess_ticker_symbol, axis=1)
+        tickers_unique = tmp_tickers['ticker_fetch'].dropna().unique().tolist()
+
+        price_map, usd_brl_now = fetch_prices(tickers_unique)
+
+        # Preço médio por ticket (apenas compras)
+        compras = ddf[ddf['compra_venda'] == 'Compra'].copy()
+        if compras.empty:
+            preco_medio = pd.DataFrame(columns=['ticket','preco_medio'])
+        else:
+            preco_medio = compras.groupby('ticket').apply(
+                lambda g: (g['preco'] * g['quantidade']).sum() / max(g['quantidade'].sum(), 1e-9)
+            ).rename('preco_medio').reset_index()
+
+        tab = tmp_tickers.merge(preco_medio, on='ticket', how='left')
+        tab['moeda'] = np.where(tab['country'].str.lower().eq('brasil'), 'BRL',
+                         np.where(tab['country'].str.lower().eq('crypto'), 'USD', 'USD'))
+        tab['preco_atual_local'] = tab['ticker_fetch'].map(price_map)
+
+        def to_brl_price(row):
+            if row['moeda'] == 'USD' and pd.notna(row['preco_atual_local']) and pd.notna(usd_brl_now):
+                return row['preco_atual_local'] * usd_brl_now
+            return row['preco_atual_local']
+
+        tab['preco_atual_brl'] = tab.apply(to_brl_price, axis=1)
+
+        tab['dif_pct'] = np.where(
+            pd.notna(tab['preco_medio']) & (tab['preco_medio'] != 0),
+            (tab['preco_atual_local'] - tab['preco_medio']) / tab['preco_medio'],
+            np.nan
+        )
+
+        tab = tab.rename(columns={
+            'ticket': 'Ticker',
+            'country': 'País',
+            'preco_medio': 'Preço médio (Local)',
+            'preco_atual_local': 'Preço atual (Local)',
+            'preco_atual_brl': 'Preço atual (BRL)',
+            'dif_pct': 'Diferença % (vs. médio)'
+        })
+        tab = tab[['Ticker','País','moeda','Preço atual (Local)','Preço atual (BRL)','Preço médio (Local)','Diferença % (vs. médio)']]
+        tab = tab.rename(columns={'moeda': 'Moeda'})
+        tab = tab.sort_values('Ticker')
+
+        st.dataframe(tab, use_container_width=True)
 
         st.markdown("---")
         st.markdown("### Detalhes (tabelas por país)")
