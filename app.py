@@ -1,12 +1,13 @@
-# app.py — v3.5.5
-# Base: v3.5.4 do usuário + PREÇOS ATUAIS (yfinance) e comparação com preço médio.
-# - `valor_investido` editável e salvo com prioridade (sem recálculo se você alterar).
-# - Recalcula apenas quando você NÃO alterar `valor_investido` e mudar preco/quantidade/compra_venda.
-# - Exclusão por checkbox na aba Movimentos.
-# - Edição inline (inclui dropdown para `onde` e `País`) e edição em massa de `onde`.
-# - Dashboards sem gráficos, com conversão BRL/USD (yfinance) e opção manual.
-# - PREÇOS ATUAIS (yfinance) por ticker + comparação com preço médio (local).
-# - Posições com P&L em BRL.
+
+# app.py — v3.5.7
+# Change: Dashboards agora **não** usa corretora para definir moeda do aporte.
+#         Regras por País:
+#           - USA  -> USD (converte para BRL)
+#           - Crypto -> **BRL** (sem conversão, pois você compra em BRL)
+#           - Brasil -> BRL
+# Mantido: Posições usam País para mapear tickers (Crypto -> BTC-USD etc.),
+#          e mostram valores atuais com yfinance.
+#          Edição inline, exclusão por checkbox, e opção de FX manual no Dashboard.
 
 import streamlit as st
 import pandas as pd
@@ -20,7 +21,7 @@ DB_PATH   = "invest.db"
 SEED_PATH = "seed_investimentos.csv"
 REQUIRE_PIN = os.getenv("APP_PIN", "1234")
 
-st.set_page_config(page_title="Controle de Investimentos – v3.5.5", page_icon="📊", layout="wide")
+st.set_page_config(page_title="Controle de Investimentos – v3.5.7", page_icon="📊", layout="wide")
 
 # ---------------------- Auth ----------------------
 if "authed" not in st.session_state:
@@ -138,35 +139,27 @@ def get_usd_brl():
     except Exception:
         return np.nan
 
-# --- NOVO: mapeamento simples para cripto
 def map_crypto_symbol(ticket: str):
     t = ticket.strip().upper()
-    # Mais comuns, amplie se quiser:
-    common = {
-        "BTC": "BTC-USD",
-        "ETH": "ETH-USD",
-        "SOL": "SOL-USD",
-    }
+    common = {"BTC": "BTC-USD", "ETH": "ETH-USD", "SOL": "SOL-USD"}
     return common.get(t, t)
 
 # ---------------------- Prices & Positions ----------------------
-# (alterada) guess_ticker_symbol para incluir cripto
 def guess_ticker_symbol(row):
     t = str(row.get('ticket','')).upper().strip()
     country = str(row.get('country','')).strip().lower()
     tipo = str(row.get('tipo','')).strip().lower()
 
-    # CRYPTO → usa par em USD para o Yahoo Finance
+    # Crypto → par USD
     if 'crypto' in country or 'cripto' in country:
         return map_crypto_symbol(t)
 
-    # Brasil → sufixo .SA
+    # Brasil → .SA
     if 'brasil' in country or 'b3' in tipo or 'fii' in tipo or 'brasil ações' in tipo:
         if t.endswith('.SA'):
             return t
         return t + '.SA'
 
-    # EUA / outros → retorna como está
     return t
 
 def fetch_prices(tickers_unique):
@@ -201,7 +194,10 @@ def build_positions(df: pd.DataFrame):
 
     tmp = df.copy()
     tmp['ticker_fetch'] = tmp.apply(guess_ticker_symbol, axis=1)
-    tmp['qtd_signed'] = np.where(tmp['compra_venda']=='Venda', -tmp['quantidade'], tmp['quantidade'])
+
+    # sinal de quantidade (+ compra, - venda)
+    tmp['qtd_signed'] = np.where(tmp['compra_venda']=='Venda', -pd.to_numeric(tmp['quantidade'], errors='coerce'),
+                                 pd.to_numeric(tmp['quantidade'], errors='coerce'))
 
     agg = tmp.groupby(['ticket','country'], dropna=False).agg(
         qtd_total=('qtd_signed','sum'),
@@ -209,7 +205,8 @@ def build_positions(df: pd.DataFrame):
     ).reset_index()
 
     compras = tmp[tmp['compra_venda'] == 'Compra'].groupby('ticket').apply(
-        lambda g: (g['preco'] * g['quantidade']).sum() / max(g['quantidade'].sum(), 1e-9)
+        lambda g: (pd.to_numeric(g['preco'], errors='coerce') * pd.to_numeric(g['quantidade'], errors='coerce')).sum()
+                  / max(pd.to_numeric(g['quantidade'], errors='coerce').sum(), 1e-9)
     ).rename('preco_medio').reset_index()
     positions = agg.merge(compras, on='ticket', how='left')
 
@@ -219,16 +216,24 @@ def build_positions(df: pd.DataFrame):
     tickers_unique = positions['ticker_fetch'].dropna().unique().tolist()
     price_map, usd_brl = fetch_prices(tickers_unique)
 
+    # garantir tipos numéricos
     positions['preco_atual'] = positions['ticker_fetch'].map(price_map)
+    positions['preco_atual'] = pd.to_numeric(positions['preco_atual'], errors='coerce')
+    positions['qtd_total'] = pd.to_numeric(positions['qtd_total'], errors='coerce').fillna(0.0)
+
+    # moeda por país (somente posições; Crypto segue USD para pegar preço do BTC-USD, etc.)
     positions['moeda'] = np.where(positions['country'].str.lower().eq('brasil'), 'BRL', 'USD')
     positions['valor_atual_moeda'] = positions['preco_atual'] * positions['qtd_total']
 
     def to_brl(row):
         if row['moeda'] == 'USD' and pd.notna(row['valor_atual_moeda']) and pd.notna(usd_brl):
             return row['valor_atual_moeda'] * usd_brl
+        if row['moeda'] == 'USD' and pd.notna(row['valor_atual_moeda']) and pd.isna(usd_brl):
+            return np.nan
         return row['valor_atual_moeda']
     positions['valor_atual_brl'] = positions.apply(to_brl, axis=1)
 
+    positions['aporte'] = pd.to_numeric(positions['aporte'], errors='coerce')
     positions['pnl_brl'] = positions['valor_atual_brl'] - positions['aporte']
     positions['pnl_pct'] = np.where(positions['aporte'] != 0, positions['pnl_brl'] / positions['aporte'], np.nan)
 
@@ -240,7 +245,7 @@ conn = get_conn()
 create_table(conn)
 seed_if_empty(conn)
 
-st.title("Controle de Investimentos – v3.5.5")
+st.title("Controle de Investimentos – v3.5.7")
 
 tab1, tab2, tab3, tab4 = st.tabs(["➕ Novo", "📋 Movimentos", "📊 Dashboards", "📦 Posições"])
 
@@ -341,7 +346,6 @@ with tab2:
         key="mov_editor"
     )
 
-    # Conversor robusto para números (remove vírgulas de milhar)
     def to_float_safe(x):
         if x is None:
             return np.nan
@@ -376,7 +380,6 @@ with tab2:
                     if changed:
                         updates[col] = new_val
 
-                # Recalcular apenas se o usuário NÃO forneceu valor_investido
                 changed_inputs = any(k in updates for k in ['preco','quantidade','compra_venda'])
                 gave_value = ('valor_investido' in updates) and (not pd.isna(to_float_safe(updates['valor_investido'])))
                 if changed_inputs and not gave_value:
@@ -466,16 +469,15 @@ with tab3:
         else:
             st.caption("USD/BRL indisponível no momento (defina manualmente para converter os valores de USA).")
 
+        # Regra SOMENTE por País para aporte:
+        # USA -> USD; Crypto -> BRL; Brasil -> BRL
         def split_values(row):
             country = row['country_norm']
             val = float(row['valor_investido']) if pd.notna(row['valor_investido']) else 0.0
             if country == 'USA':
                 brl = val * usd_brl if pd.notna(usd_brl) and usd_brl != 0 else np.nan
                 return pd.Series({'valor_local': val, 'moeda_local': 'USD', 'valor_brl': brl})
-            elif country == 'Crypto':
-                brl = val * usd_brl if pd.notna(usd_brl) and usd_brl != 0 else np.nan
-                return pd.Series({'valor_local': val, 'moeda_local': 'USD', 'valor_brl': brl})
-            else:
+            else:  # 'Crypto' e 'Brasil' tratados como BRL
                 return pd.Series({'valor_local': val, 'moeda_local': 'BRL', 'valor_brl': val})
 
         ddf = pd.concat([ddf, ddf.apply(split_values, axis=1)], axis=1)
@@ -503,7 +505,7 @@ with tab3:
         by_country = by_country.sort_values('Aporte (BRL)', ascending=False, na_position='last')
         st.dataframe(by_country, use_container_width=True)
 
-        # --- NOVO: PREÇOS ATUAIS + COMPARAÇÃO COM PREÇO MÉDIO ---
+        # --- Preços atuais (yfinance) + comparação com preço médio ---
         st.markdown("### Preços atuais (yfinance) e comparação com preço médio")
 
         tmp_tickers = ddf.drop_duplicates('ticket')[['ticket','country','tipo']].copy()
@@ -512,13 +514,13 @@ with tab3:
 
         price_map, usd_brl_now = fetch_prices(tickers_unique)
 
-        # Preço médio por ticket (apenas compras)
         compras = ddf[ddf['compra_venda'] == 'Compra'].copy()
         if compras.empty:
             preco_medio = pd.DataFrame(columns=['ticket','preco_medio'])
         else:
             preco_medio = compras.groupby('ticket').apply(
-                lambda g: (g['preco'] * g['quantidade']).sum() / max(g['quantidade'].sum(), 1e-9)
+                lambda g: (pd.to_numeric(g['preco'], errors='coerce') * pd.to_numeric(g['quantidade'], errors='coerce')).sum()
+                          / max(pd.to_numeric(g['quantidade'], errors='coerce').sum(), 1e-9)
             ).rename('preco_medio').reset_index()
 
         tab = tmp_tickers.merge(preco_medio, on='ticket', how='left')
@@ -608,7 +610,8 @@ with tab4:
 
         if isinstance(pos, pd.DataFrame) and not pos.empty:
             k1, k2 = st.columns(2)
-            k1.metric("Valor total (BRL)", f"{pos['valor_atual_brl'].sum():,.2f}")
+            total_brl = pd.to_numeric(pos['valor_atual_brl'], errors='coerce').sum(skipna=True)
+            k1.metric("Valor total (BRL)", f"{total_brl:,.2f}")
             if usd_brl and not np.isnan(usd_brl):
                 k2.metric("USD/BRL (yfinance)", f"{usd_brl:,.4f}")
 
