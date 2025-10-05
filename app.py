@@ -1,13 +1,13 @@
-
-# app.py — v3.5.7
-# Change: Dashboards agora **não** usa corretora para definir moeda do aporte.
-#         Regras por País:
-#           - USA  -> USD (converte para BRL)
-#           - Crypto -> **BRL** (sem conversão, pois você compra em BRL)
-#           - Brasil -> BRL
-# Mantido: Posições usam País para mapear tickers (Crypto -> BTC-USD etc.),
-#          e mostram valores atuais com yfinance.
-#          Edição inline, exclusão por checkbox, e opção de FX manual no Dashboard.
+# app.py — v3.6.0
+# Novidades:
+# - Coluna **ticker_oficial** (editável) na aba Movimentos.
+# - Preços do Yahoo Finance passam a usar **ticker_oficial**. Se vazio, cai no fallback automático.
+# - Migração automática do banco: adiciona ticker_oficial se não existir.
+# - Mantidas: edição inline, exclusão por checkbox, conversão USD/BRL e preços em Posições.
+#
+# Regras de moeda:
+# - Dashboards (aportes): País define moeda → USA: USD (converte), Crypto: BRL, Brasil: BRL.
+# - Posições (preços): Brasil BRL; demais (USA/Cripto) USD e converte p/ BRL via USD/BRL.
 
 import streamlit as st
 import pandas as pd
@@ -21,7 +21,7 @@ DB_PATH   = "invest.db"
 SEED_PATH = "seed_investimentos.csv"
 REQUIRE_PIN = os.getenv("APP_PIN", "1234")
 
-st.set_page_config(page_title="Controle de Investimentos – v3.5.7", page_icon="📊", layout="wide")
+st.set_page_config(page_title="Controle de Investimentos – v3.6.0", page_icon="📊", layout="wide")
 
 # ---------------------- Auth ----------------------
 if "authed" not in st.session_state:
@@ -64,6 +64,14 @@ def create_table(conn):
     );
     """)
     conn.commit()
+    # Garantir coluna ticker_oficial (migração leve)
+    cols = [r[1] for r in conn.execute("PRAGMA table_info(movimentos)")]
+    if "ticker_oficial" not in cols:
+        try:
+            conn.execute("ALTER TABLE movimentos ADD COLUMN ticker_oficial TEXT;")
+            conn.commit()
+        except Exception:
+            pass
 
 def seed_if_empty(conn):
     cur = conn.execute("SELECT COUNT(*) FROM movimentos")
@@ -71,7 +79,7 @@ def seed_if_empty(conn):
     if count == 0 and os.path.exists(SEED_PATH):
         df = pd.read_csv(SEED_PATH, parse_dates=['data'])
         ensure_cols = ['data','ticket','nome','preco','quantidade','valor_investido','compra_venda',
-                       'onde','tipo','obs','country','categoria','month','year']
+                       'onde','tipo','obs','country','categoria','month','year','ticker_oficial']
         for c in ensure_cols:
             if c not in df.columns: df[c] = np.nan
         df['data'] = pd.to_datetime(df['data'], errors='coerce')
@@ -89,12 +97,12 @@ def load_df(conn):
 def insert_movimento(conn, row: dict):
     conn.execute("""
         INSERT INTO movimentos 
-        (data, ticket, nome, preco, quantidade, valor_investido, compra_venda, onde, tipo, obs, country, categoria, month, year)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        (data, ticket, nome, preco, quantidade, valor_investido, compra_venda, onde, tipo, obs, country, categoria, month, year, ticker_oficial)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
         row['data'], row['ticket'], row['nome'], row['preco'], row['quantidade'], row['valor_investido'],
         row['compra_venda'], row['onde'], row['tipo'], row['obs'], row['country'], row['categoria'],
-        row['month'], row['year']
+        row['month'], row['year'], row.get('ticker_oficial')
     ))
     conn.commit()
 
@@ -140,28 +148,26 @@ def get_usd_brl():
         return np.nan
 
 def map_crypto_symbol(ticket: str):
-    t = ticket.strip().upper()
+    t = str(ticket).strip().upper()
     common = {"BTC": "BTC-USD", "ETH": "ETH-USD", "SOL": "SOL-USD"}
     return common.get(t, t)
 
-# ---------------------- Prices & Positions ----------------------
-def guess_ticker_symbol(row):
-    t = str(row.get('ticket','')).upper().strip()
-    country = str(row.get('country','')).strip().lower()
-    tipo = str(row.get('tipo','')).strip().lower()
-
-    # Crypto → par USD
+def guess_ticker_symbol(ticket: str, country: str, tipo: str = ""):
+    """Fallback automático quando ticker_oficial estiver vazio."""
+    t = str(ticket).upper().strip()
+    country = (country or "").strip().lower()
+    tipo = (tipo or "").strip().lower()
     if 'crypto' in country or 'cripto' in country:
         return map_crypto_symbol(t)
-
-    # Brasil → .SA
     if 'brasil' in country or 'b3' in tipo or 'fii' in tipo or 'brasil ações' in tipo:
-        if t.endswith('.SA'):
-            return t
-        return t + '.SA'
-
+        return t if t.endswith('.SA') else t + '.SA'
     return t
 
+def suggest_official_from(ticket: str, country: str):
+    """Sugestão para o formulário Novo."""
+    return guess_ticker_symbol(ticket, country)
+
+# ---------------------- Prices ----------------------
 def fetch_prices(tickers_unique):
     prices = {tk: np.nan for tk in tickers_unique}
     usd_brl = np.nan
@@ -188,16 +194,21 @@ def fetch_prices(tickers_unique):
     usd_brl = get_usd_brl()
     return prices, usd_brl
 
+# ---------------------- Build positions ----------------------
 def build_positions(df: pd.DataFrame):
     if df.empty:
         return pd.DataFrame(), np.nan
 
     tmp = df.copy()
-    tmp['ticker_fetch'] = tmp.apply(guess_ticker_symbol, axis=1)
+    # Ticker a usar: ticker_oficial (se houver), senão fallback
+    tmp['ticker_used'] = tmp.apply(
+        lambda r: r['ticker_oficial'] if pd.notna(r.get('ticker_oficial')) and str(r.get('ticker_oficial')).strip() != "" 
+        else guess_ticker_symbol(r.get('ticket',''), r.get('country',''), r.get('tipo','')), axis=1
+    )
 
-    # sinal de quantidade (+ compra, - venda)
-    tmp['qtd_signed'] = np.where(tmp['compra_venda']=='Venda', -pd.to_numeric(tmp['quantidade'], errors='coerce'),
-                                 pd.to_numeric(tmp['quantidade'], errors='coerce'))
+    # sinal de quantidade
+    qnum = pd.to_numeric(tmp['quantidade'], errors='coerce')
+    tmp['qtd_signed'] = np.where(tmp['compra_venda']=='Venda', -qnum, qnum)
 
     agg = tmp.groupby(['ticket','country'], dropna=False).agg(
         qtd_total=('qtd_signed','sum'),
@@ -208,20 +219,20 @@ def build_positions(df: pd.DataFrame):
         lambda g: (pd.to_numeric(g['preco'], errors='coerce') * pd.to_numeric(g['quantidade'], errors='coerce')).sum()
                   / max(pd.to_numeric(g['quantidade'], errors='coerce').sum(), 1e-9)
     ).rename('preco_medio').reset_index()
+
     positions = agg.merge(compras, on='ticket', how='left')
 
-    fetch_map = tmp.drop_duplicates('ticket')[['ticket','ticker_fetch']]
+    fetch_map = tmp.drop_duplicates('ticket')[['ticket','ticker_used']]
     positions = positions.merge(fetch_map, on='ticket', how='left')
 
-    tickers_unique = positions['ticker_fetch'].dropna().unique().tolist()
+    tickers_unique = positions['ticker_used'].dropna().unique().tolist()
     price_map, usd_brl = fetch_prices(tickers_unique)
 
-    # garantir tipos numéricos
-    positions['preco_atual'] = positions['ticker_fetch'].map(price_map)
-    positions['preco_atual'] = pd.to_numeric(positions['preco_atual'], errors='coerce')
-    positions['qtd_total'] = pd.to_numeric(positions['qtd_total'], errors='coerce').fillna(0.0)
+    positions['preco_atual'] = pd.to_numeric(positions['ticker_used'].map(price_map), errors='coerce')
+    positions['qtd_total']  = pd.to_numeric(positions['qtd_total'], errors='coerce').fillna(0.0)
+    positions['aporte']     = pd.to_numeric(positions['aporte'], errors='coerce')
 
-    # moeda por país (somente posições; Crypto segue USD para pegar preço do BTC-USD, etc.)
+    # moeda por país (posições): Brasil = BRL; demais = USD (inclui Crypto)
     positions['moeda'] = np.where(positions['country'].str.lower().eq('brasil'), 'BRL', 'USD')
     positions['valor_atual_moeda'] = positions['preco_atual'] * positions['qtd_total']
 
@@ -233,7 +244,6 @@ def build_positions(df: pd.DataFrame):
         return row['valor_atual_moeda']
     positions['valor_atual_brl'] = positions.apply(to_brl, axis=1)
 
-    positions['aporte'] = pd.to_numeric(positions['aporte'], errors='coerce')
     positions['pnl_brl'] = positions['valor_atual_brl'] - positions['aporte']
     positions['pnl_pct'] = np.where(positions['aporte'] != 0, positions['pnl_brl'] / positions['aporte'], np.nan)
 
@@ -245,7 +255,7 @@ conn = get_conn()
 create_table(conn)
 seed_if_empty(conn)
 
-st.title("Controle de Investimentos – v3.5.7")
+st.title("Controle de Investimentos – v3.6.0")
 
 tab1, tab2, tab3, tab4 = st.tabs(["➕ Novo", "📋 Movimentos", "📊 Dashboards", "📦 Posições"])
 
@@ -259,13 +269,17 @@ with tab1:
         nome = st.text_input("Nome do ativo (opcional)", key="novo_nome")
         preco = st.number_input("Preço por unidade", min_value=0.0, step=0.01, format="%.6f", key="novo_preco")
         quantidade = st.number_input("Quantidade", min_value=0.0, step=1.0, format="%.6f", key="novo_qtd")
+        country = st.selectbox("País", ["Brasil","USA","Crypto"], index=0, key="novo_pais")
     with col2:
         compra_venda = st.selectbox("Operação", ["Compra", "Venda"], key="novo_op")
         onde = st.text_input("Onde (corretora/plataforma)", key="novo_onde")
         tipo = st.text_input("Tipo (ex: Brasil Ações, EUA Ações, FII, ETF)", key="novo_tipo")
-        country = st.selectbox("País", ["Brasil","USA","Crypto"], index=0, key="novo_pais")
         categoria = st.text_input("Categoria (ex: RV, RF, FII, ETF)", value="RV", key="novo_cat")
         obs = st.text_area("Observações", key="novo_obs")
+        # sugestão automática para o ticker_oficial
+        sugestao = suggest_official_from(ticket, country) if ticket else ""
+        ticker_oficial = st.text_input("Ticker oficial (Yahoo Finance)", value=sugestao, key="novo_ticker_oficial",
+                                       help="Exemplos: PETR4.SA, AAPL, BTC-USD. Pode aceitar a sugestão e ajustar depois na aba Movimentos.")
 
     if st.button("Salvar", key="novo_salvar"):
         valor_investido = float(preco) * float(quantidade)
@@ -273,17 +287,18 @@ with tab1:
             valor_investido = -valor_investido
         row = {
             "data": pd.to_datetime(data).strftime("%Y-%m-%d"),
-            "ticket": ticket.strip().upper(),
-            "nome": nome.strip(),
+            "ticket": (ticket or "").strip().upper(),
+            "nome": (nome or "").strip(),
             "preco": float(preco),
             "quantidade": float(quantidade),
             "valor_investido": float(valor_investido),
             "compra_venda": compra_venda,
-            "onde": onde.strip(),
-            "tipo": tipo.strip(),
-            "obs": obs.strip(),
-            "country": country.strip(),
-            "categoria": categoria.strip(),
+            "onde": (onde or "").strip(),
+            "tipo": (tipo or "").strip(),
+            "obs": (obs or "").strip(),
+            "country": (country or "").strip(),
+            "categoria": (categoria or "").strip(),
+            "ticker_oficial": (ticker_oficial or "").strip() or suggest_official_from(ticket, country),
         }
         row["month"] = pd.to_datetime(row["data"]).month
         row["year"]  = pd.to_datetime(row["data"]).year
@@ -311,7 +326,7 @@ with tab2:
 
     fdf = df.copy()
     if filtro_ticket:
-        fdf = fdf[fdf['ticket'].str.contains(filtro_ticket.strip().upper(), na=False)]
+        fdf = fdf[fdf['ticket'].str.contains((filtro_ticket or "").strip().upper(), na=False)]
     if filtro_ano:
         fdf = fdf[fdf['year'].isin(filtro_ano)]
     if filtro_operacao:
@@ -319,12 +334,12 @@ with tab2:
     if filtro_onde:
         fdf = fdf[fdf['onde'].str.contains(filtro_onde, na=False, case=False)]
 
-    st.caption("✅ Edite as células (inclui **valor_investido**), marque 'Excluir' para remover linhas e use os botões abaixo.")
+    st.caption("✅ Edite as células (inclui **valor_investido** e **ticker_oficial**), marque 'Excluir' e use os botões.")
 
     onde_options = sorted(list(set(df['onde'].dropna().tolist() + ["XP","Rico","Nubank","Clear","Avenue","Biscoint"])))
 
     fdf_view = fdf[['id','data','ticket','nome','preco','quantidade','valor_investido',
-                    'compra_venda','onde','tipo','country','categoria','obs']].copy()
+                    'compra_venda','onde','tipo','country','categoria','ticker_oficial','obs']].copy()
     fdf_view.insert(1, "excluir", False)
 
     edited = st.data_editor(
@@ -341,6 +356,7 @@ with tab2:
             "compra_venda": st.column_config.SelectboxColumn("compra_venda", options=["Compra","Venda"]),
             "onde": st.column_config.SelectboxColumn("onde", options=onde_options),
             "country": st.column_config.SelectboxColumn("País", options=["Brasil","USA","Crypto"]),
+            "ticker_oficial": st.column_config.TextColumn("ticker_oficial", help="Ticker no Yahoo Finance (ex.: PETR4.SA, AAPL, BTC-USD)"),
         },
         use_container_width=True,
         key="mov_editor"
@@ -367,7 +383,7 @@ with tab2:
                 orig = fdf[fdf['id']==row['id']].iloc[0]
                 updates = {}
                 for col in ['data','ticket','nome','preco','quantidade','valor_investido',
-                            'compra_venda','onde','tipo','country','categoria','obs']:
+                            'compra_venda','onde','tipo','country','categoria','ticker_oficial','obs']:
                     new_val = row[col]
                     old_val = orig[col]
                     if col == 'data':
@@ -477,7 +493,7 @@ with tab3:
             if country == 'USA':
                 brl = val * usd_brl if pd.notna(usd_brl) and usd_brl != 0 else np.nan
                 return pd.Series({'valor_local': val, 'moeda_local': 'USD', 'valor_brl': brl})
-            else:  # 'Crypto' e 'Brasil' tratados como BRL
+            else:
                 return pd.Series({'valor_local': val, 'moeda_local': 'BRL', 'valor_brl': val})
 
         ddf = pd.concat([ddf, ddf.apply(split_values, axis=1)], axis=1)
@@ -505,13 +521,14 @@ with tab3:
         by_country = by_country.sort_values('Aporte (BRL)', ascending=False, na_position='last')
         st.dataframe(by_country, use_container_width=True)
 
-        # --- Preços atuais (yfinance) + comparação com preço médio ---
+        # Preços atuais comparados ao preço médio (usando ticker_oficial)
         st.markdown("### Preços atuais (yfinance) e comparação com preço médio")
-
-        tmp_tickers = ddf.drop_duplicates('ticket')[['ticket','country','tipo']].copy()
-        tmp_tickers['ticker_fetch'] = tmp_tickers.apply(guess_ticker_symbol, axis=1)
-        tickers_unique = tmp_tickers['ticker_fetch'].dropna().unique().tolist()
-
+        tmp_tickers = ddf.drop_duplicates('ticket')[['ticket','country','tipo','ticker_oficial']].copy()
+        tmp_tickers['ticker_used'] = tmp_tickers.apply(
+            lambda r: r['ticker_oficial'] if pd.notna(r.get('ticker_oficial')) and str(r.get('ticker_oficial')).strip() != "" 
+            else guess_ticker_symbol(r.get('ticket',''), r.get('country',''), r.get('tipo','')), axis=1
+        )
+        tickers_unique = tmp_tickers['ticker_used'].dropna().unique().tolist()
         price_map, usd_brl_now = fetch_prices(tickers_unique)
 
         compras = ddf[ddf['compra_venda'] == 'Compra'].copy()
@@ -524,9 +541,8 @@ with tab3:
             ).rename('preco_medio').reset_index()
 
         tab = tmp_tickers.merge(preco_medio, on='ticket', how='left')
-        tab['moeda'] = np.where(tab['country'].str.lower().eq('brasil'), 'BRL',
-                         np.where(tab['country'].str.lower().eq('crypto'), 'USD', 'USD'))
-        tab['preco_atual_local'] = tab['ticker_fetch'].map(price_map)
+        tab['moeda'] = np.where(tab['country'].str.lower().eq('brasil'), 'BRL', 'USD')
+        tab['preco_atual_local'] = pd.to_numeric(tab['ticker_used'].map(price_map), errors='coerce')
 
         def to_brl_price(row):
             if row['moeda'] == 'USD' and pd.notna(row['preco_atual_local']) and pd.notna(usd_brl_now):
@@ -589,41 +605,4 @@ with tab3:
             cr = ddf[ddf['country_norm']=='Crypto']
             if cr.empty: st.info("Sem dados de cripto.")
             else:
-                det = cr.groupby('ticket', dropna=True).agg(
-                    quantidade_total=('quantidade', 'sum'),
-                    aporte_local=('valor_local','sum'),
-                    aporte_brl=('valor_brl','sum'),
-                    primeira_data=('data','min'),
-                    ultima_data=('data','max'),
-                    onde_principal=('onde', lambda x: x.value_counts(dropna=True).index[0] if len(x.dropna())>0 else None)
-                ).reset_index().sort_values('aporte_brl', ascending=False)
-                st.dataframe(det, use_container_width=True)
-
-# ---- Posições
-with tab4:
-    st.subheader("Posições e P&L (valores em BRL)")
-    df = load_df(conn)
-    if df.empty:
-        st.info("Sem dados ainda.")
-    else:
-        pos, usd_brl = build_positions(df)
-
-        if isinstance(pos, pd.DataFrame) and not pos.empty:
-            k1, k2 = st.columns(2)
-            total_brl = pd.to_numeric(pos['valor_atual_brl'], errors='coerce').sum(skipna=True)
-            k1.metric("Valor total (BRL)", f"{total_brl:,.2f}")
-            if usd_brl and not np.isnan(usd_brl):
-                k2.metric("USD/BRL (yfinance)", f"{usd_brl:,.4f}")
-
-            show_cols = ['ticket','qtd_total','preco_medio','preco_atual','valor_atual_brl','aporte','pnl_brl','pnl_pct','country']
-            st.dataframe(pos[show_cols], use_container_width=True)
-
-            top = pos.sort_values('pnl_brl', ascending=False).head(10)
-            fig1, ax1 = plt.subplots(figsize=(6,3))
-            ax1.barh(top['ticket'], top['pnl_brl'])
-            ax1.set_title('Top P&L (BRL)')
-            ax1.set_xlabel('BRL')
-            ax1.set_ylabel('Ticker')
-            st.pyplot(fig1, use_container_width=False)
-        else:
-            st.info("Não foi possível calcular posições ainda.")
+                det = cr.groupby('ticket', dropna=True).
