@@ -1,10 +1,9 @@
-# app.py — v3.6.2
-# - Nova coluna 'ticker_oficial' (migrada automaticamente) e usada com prioridade para buscar preços no Yahoo Finance.
-# - Editor salva 'ticker_oficial' corretamente.
-# - Posições exibem preço atual, valor atual (BRL) e P&L.
-# - Dashboards com USD/BRL automático (yfinance) e opção manual.
-# - Movimentos: edição inline (inclui valor_investido e ticker_oficial), exclusão por checkbox e edição em massa de 'onde'.
-# - Login por PIN via APP_PIN (default: 1234).
+# app.py — v3.6.3
+# Ajustes:
+# - Dashboards grava a FX usada em st.session_state['fx_in_use'].
+# - Posições usa a mesma FX (ou pede manual se não houver).
+# - build_positions aceita fallback_fx para conversão USD→BRL.
+# - Mantém ticker_oficial com prioridade p/ preços (yfinance).
 
 import os
 import sqlite3
@@ -19,7 +18,7 @@ DB_PATH   = "invest.db"
 SEED_PATH = "seed_investimentos.csv"
 REQUIRE_PIN = os.getenv("APP_PIN", "1234")
 
-st.set_page_config(page_title="Controle de Investimentos – v3.6.2", page_icon="📊", layout="wide")
+st.set_page_config(page_title="Controle de Investimentos – v3.6.3", page_icon="📊", layout="wide")
 
 # ---------------------- Auth ----------------------
 if "authed" not in st.session_state:
@@ -146,15 +145,12 @@ def guess_ticker_symbol(row):
     t = str(row.get('ticket','')).upper().strip()
     country = str(row.get('country','')).strip().lower()
     tipo = str(row.get('tipo','')).strip().lower()
-    # Crypto comuns em USD
     if 'crypto' in country or 'cripto' in country or 'crypto' in tipo or 'cripto' in tipo:
         if t.endswith('-USD'): return t
         return f"{t}-USD"
-    # Brasil / B3
     if 'brasil' in country or 'b3' in tipo or 'fii' in tipo or 'brasil ações' in tipo:
         if t.endswith('.SA'): return t
         return t + '.SA'
-    # USA default
     return t
 
 def pick_fetch_symbol(row):
@@ -176,8 +172,6 @@ def fetch_prices(tickers_unique):
         if isinstance(close, pd.Series):
             close = close.to_frame()
         close = close.ffill()
-        if close.empty:
-            return prices, usd_brl
         latest = close.iloc[-1]
         for tk in tickers_unique:
             try:
@@ -189,7 +183,7 @@ def fetch_prices(tickers_unique):
     usd_brl = get_usd_brl()
     return prices, usd_brl
 
-def build_positions(df: pd.DataFrame):
+def build_positions(df: pd.DataFrame, fallback_fx=np.nan):
     if df.empty:
         return pd.DataFrame(), np.nan
 
@@ -211,19 +205,24 @@ def build_positions(df: pd.DataFrame):
     positions = positions.merge(fetch_map, on='ticket', how='left')
 
     tickers_unique = positions['ticker_fetch'].dropna().unique().tolist()
-    price_map, usd_brl = fetch_prices(tickers_unique)
+    price_map, usd_brl_auto = fetch_prices(tickers_unique)
 
     positions['preco_atual'] = positions['ticker_fetch'].map(price_map)
     positions['moeda'] = np.where(positions['country'].str.lower().eq('brasil'), 'BRL',
                           np.where(positions['country'].str.lower().eq('crypto'), 'USD', 'USD'))
     positions['valor_atual_moeda'] = positions['preco_atual'] * positions['qtd_total']
 
+    # FX a usar: yfinance; se não vier, cai para fallback
+    usd_brl = usd_brl_auto
+    if pd.isna(usd_brl) and pd.notna(fallback_fx):
+        usd_brl = float(fallback_fx)
+
     def to_brl(row):
         if row['moeda'] == 'USD' and pd.notna(row['valor_atual_moeda']) and pd.notna(usd_brl):
             return row['valor_atual_moeda'] * usd_brl
         return row['valor_atual_moeda']
-    positions['valor_atual_brl'] = positions.apply(to_brl, axis=1)
 
+    positions['valor_atual_brl'] = positions.apply(to_brl, axis=1)
     positions['pnl_brl'] = positions['valor_atual_brl'] - positions['aporte']
     positions['pnl_pct'] = np.where(positions['aporte'] != 0, positions['pnl_brl'] / positions['aporte'], np.nan)
 
@@ -236,7 +235,7 @@ create_table(conn)
 ensure_column_ticker_oficial(conn)
 seed_if_empty(conn)
 
-st.title("Controle de Investimentos – v3.6.2")
+st.title("Controle de Investimentos – v3.6.3")
 
 tab1, tab2, tab3, tab4 = st.tabs(["➕ Novo", "📋 Movimentos", "📊 Dashboards", "📦 Posições"])
 
@@ -458,6 +457,9 @@ with tab3:
                                         disabled=not use_manual, key="fx_manual")
         usd_brl = fx_manual if use_manual else fx_auto
 
+        # ✔ Compartilha FX usada com a aba Posições
+        st.session_state['fx_in_use'] = float(usd_brl) if pd.notna(usd_brl) else np.nan
+
         if pd.notna(usd_brl):
             st.caption(f"USD/BRL em uso: {usd_brl:,.4f} ({'manual' if use_manual else 'yfinance'})")
         else:
@@ -466,7 +468,7 @@ with tab3:
         def split_values(row):
             country = row['country_norm']
             val = float(row['valor_investido']) if pd.notna(row['valor_investido']) else 0.0
-            if country == 'USA' or country == 'Crypto':
+            if country in ('USA', 'Crypto'):
                 brl = val * usd_brl if pd.notna(usd_brl) and usd_brl != 0 else np.nan
                 return pd.Series({'valor_local': val, 'moeda_local': 'USD', 'valor_brl': brl})
             else:
@@ -499,7 +501,7 @@ with tab3:
 
         st.markdown("---")
         st.markdown("### Preços atuais (yfinance) e comparação com preço médio")
-        pos_tmp, usd_brl_tmp = build_positions(df)
+        pos_tmp, usd_brl_tmp = build_positions(df, fallback_fx=st.session_state.get('fx_in_use', np.nan))
         if not pos_tmp.empty:
             tbl = pos_tmp[['ticket','preco_medio','preco_atual','valor_atual_brl','aporte','pnl_brl','pnl_pct']].copy()
             st.dataframe(tbl, use_container_width=True)
@@ -513,13 +515,17 @@ with tab4:
     if df.empty:
         st.info("Sem dados ainda.")
     else:
-        pos, usd_brl = build_positions(df)
+        # ⚙️ Usa a FX decidida nos dashboards; se não houver, pede manual
+        fx_fallback = st.session_state.get('fx_in_use', np.nan)
+        if pd.isna(fx_fallback):
+            fx_fallback = st.number_input("USD/BRL para cálculo das posições (fallback)", value=5.00, step=0.01, format="%.4f")
+        pos, usd_brl_used = build_positions(df, fallback_fx=fx_fallback)
 
         if isinstance(pos, pd.DataFrame) and not pos.empty:
             k1, k2 = st.columns(2)
             k1.metric("Valor total (BRL)", f"{pos['valor_atual_brl'].sum(skipna=True):,.2f}")
-            if usd_brl and not np.isnan(usd_brl):
-                k2.metric("USD/BRL (yfinance)", f"{usd_brl:,.4f}")
+            if pd.notna(usd_brl_used):
+                k2.metric("USD/BRL usado", f"{usd_brl_used:,.4f}")
 
             show_cols = ['ticket','qtd_total','preco_medio','preco_atual','valor_atual_brl','aporte','pnl_brl','pnl_pct','country']
             st.dataframe(pos[show_cols], use_container_width=True)
