@@ -1,13 +1,10 @@
-# app.py — v3.6.0
-# Novidades:
-# - Coluna **ticker_oficial** (editável) na aba Movimentos.
-# - Preços do Yahoo Finance passam a usar **ticker_oficial**. Se vazio, cai no fallback automático.
-# - Migração automática do banco: adiciona ticker_oficial se não existir.
-# - Mantidas: edição inline, exclusão por checkbox, conversão USD/BRL e preços em Posições.
+
+# app.py — v3.6.1
+# - Corrige bug de sintaxe na seção "Crypto" (Dashboards).
+# - Mantém coluna ticker_oficial e preços pelo Yahoo Finance com fallback.
+# - Conversão USD/BRL via yfinance (ou manual).
 #
-# Regras de moeda:
-# - Dashboards (aportes): País define moeda → USA: USD (converte), Crypto: BRL, Brasil: BRL.
-# - Posições (preços): Brasil BRL; demais (USA/Cripto) USD e converte p/ BRL via USD/BRL.
+# Observação: este app assume Python 3.10+ e Streamlit 1.30+.
 
 import streamlit as st
 import pandas as pd
@@ -21,7 +18,7 @@ DB_PATH   = "invest.db"
 SEED_PATH = "seed_investimentos.csv"
 REQUIRE_PIN = os.getenv("APP_PIN", "1234")
 
-st.set_page_config(page_title="Controle de Investimentos – v3.6.0", page_icon="📊", layout="wide")
+st.set_page_config(page_title="Controle de Investimentos – v3.6.1", page_icon="📊", layout="wide")
 
 # ---------------------- Auth ----------------------
 if "authed" not in st.session_state:
@@ -153,7 +150,6 @@ def map_crypto_symbol(ticket: str):
     return common.get(t, t)
 
 def guess_ticker_symbol(ticket: str, country: str, tipo: str = ""):
-    """Fallback automático quando ticker_oficial estiver vazio."""
     t = str(ticket).upper().strip()
     country = (country or "").strip().lower()
     tipo = (tipo or "").strip().lower()
@@ -164,7 +160,6 @@ def guess_ticker_symbol(ticket: str, country: str, tipo: str = ""):
     return t
 
 def suggest_official_from(ticket: str, country: str):
-    """Sugestão para o formulário Novo."""
     return guess_ticker_symbol(ticket, country)
 
 # ---------------------- Prices ----------------------
@@ -200,13 +195,11 @@ def build_positions(df: pd.DataFrame):
         return pd.DataFrame(), np.nan
 
     tmp = df.copy()
-    # Ticker a usar: ticker_oficial (se houver), senão fallback
     tmp['ticker_used'] = tmp.apply(
         lambda r: r['ticker_oficial'] if pd.notna(r.get('ticker_oficial')) and str(r.get('ticker_oficial')).strip() != "" 
         else guess_ticker_symbol(r.get('ticket',''), r.get('country',''), r.get('tipo','')), axis=1
     )
 
-    # sinal de quantidade
     qnum = pd.to_numeric(tmp['quantidade'], errors='coerce')
     tmp['qtd_signed'] = np.where(tmp['compra_venda']=='Venda', -qnum, qnum)
 
@@ -232,7 +225,6 @@ def build_positions(df: pd.DataFrame):
     positions['qtd_total']  = pd.to_numeric(positions['qtd_total'], errors='coerce').fillna(0.0)
     positions['aporte']     = pd.to_numeric(positions['aporte'], errors='coerce')
 
-    # moeda por país (posições): Brasil = BRL; demais = USD (inclui Crypto)
     positions['moeda'] = np.where(positions['country'].str.lower().eq('brasil'), 'BRL', 'USD')
     positions['valor_atual_moeda'] = positions['preco_atual'] * positions['qtd_total']
 
@@ -255,7 +247,7 @@ conn = get_conn()
 create_table(conn)
 seed_if_empty(conn)
 
-st.title("Controle de Investimentos – v3.6.0")
+st.title("Controle de Investimentos – v3.6.1")
 
 tab1, tab2, tab3, tab4 = st.tabs(["➕ Novo", "📋 Movimentos", "📊 Dashboards", "📦 Posições"])
 
@@ -276,10 +268,9 @@ with tab1:
         tipo = st.text_input("Tipo (ex: Brasil Ações, EUA Ações, FII, ETF)", key="novo_tipo")
         categoria = st.text_input("Categoria (ex: RV, RF, FII, ETF)", value="RV", key="novo_cat")
         obs = st.text_area("Observações", key="novo_obs")
-        # sugestão automática para o ticker_oficial
         sugestao = suggest_official_from(ticket, country) if ticket else ""
         ticker_oficial = st.text_input("Ticker oficial (Yahoo Finance)", value=sugestao, key="novo_ticker_oficial",
-                                       help="Exemplos: PETR4.SA, AAPL, BTC-USD. Pode aceitar a sugestão e ajustar depois na aba Movimentos.")
+                                       help="Ex.: PETR4.SA, AAPL, BTC-USD. Pode ajustar depois na aba Movimentos.")
 
     if st.button("Salvar", key="novo_salvar"):
         valor_investido = float(preco) * float(quantidade)
@@ -485,8 +476,6 @@ with tab3:
         else:
             st.caption("USD/BRL indisponível no momento (defina manualmente para converter os valores de USA).")
 
-        # Regra SOMENTE por País para aporte:
-        # USA -> USD; Crypto -> BRL; Brasil -> BRL
         def split_values(row):
             country = row['country_norm']
             val = float(row['valor_investido']) if pd.notna(row['valor_investido']) else 0.0
@@ -521,7 +510,6 @@ with tab3:
         by_country = by_country.sort_values('Aporte (BRL)', ascending=False, na_position='last')
         st.dataframe(by_country, use_container_width=True)
 
-        # Preços atuais comparados ao preço médio (usando ticker_oficial)
         st.markdown("### Preços atuais (yfinance) e comparação com preço médio")
         tmp_tickers = ddf.drop_duplicates('ticket')[['ticket','country','tipo','ticker_oficial']].copy()
         tmp_tickers['ticker_used'] = tmp_tickers.apply(
@@ -605,4 +593,40 @@ with tab3:
             cr = ddf[ddf['country_norm']=='Crypto']
             if cr.empty: st.info("Sem dados de cripto.")
             else:
-                det = cr.groupby('ticket', dropna=True).
+                det = cr.groupby('ticket', dropna=True).agg(
+                    quantidade_total=('quantidade', 'sum'),
+                    aporte_local=('valor_local','sum'),
+                    aporte_brl=('valor_brl','sum'),
+                    primeira_data=('data','min'),
+                    ultima_data=('data','max'),
+                    onde_principal=('onde', lambda x: x.value_counts(dropna=True).index[0] if len(x.dropna())>0 else None)
+                ).reset_index().sort_values('aporte_brl', ascending=False)
+                st.dataframe(det, use_container_width=True)
+
+# ---- Posições
+with tab4:
+    st.subheader("Posições e P&L (valores em BRL)")
+    df = load_df(conn)
+    if df.empty:
+        st.info("Sem dados ainda.")
+    else:
+        pos, usd_brl = build_positions(df)
+
+        if isinstance(pos, pd.DataFrame) and not pos.empty:
+            k1, k2 = st.columns(2)
+            k1.metric("Valor total (BRL)", f"{pos['valor_atual_brl'].sum():,.2f}")
+            if usd_brl and not np.isnan(usd_brl):
+                k2.metric("USD/BRL (yfinance)", f"{usd_brl:,.4f}")
+
+            show_cols = ['ticket','qtd_total','preco_medio','preco_atual','valor_atual_brl','aporte','pnl_brl','pnl_pct','country']
+            st.dataframe(pos[show_cols], use_container_width=True)
+
+            top = pos.sort_values('pnl_brl', ascending=False).head(10)
+            fig1, ax1 = plt.subplots(figsize=(6,3))
+            ax1.barh(top['ticket'], top['pnl_brl'])
+            ax1.set_title('Top P&L (BRL)')
+            ax1.set_xlabel('BRL')
+            ax1.set_ylabel('Ticker')
+            st.pyplot(fig1, use_container_width=False)
+        else:
+            st.info("Não foi possível calcular posições ainda.")
