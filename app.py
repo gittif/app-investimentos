@@ -267,7 +267,7 @@ if filtro_operacao:
 fdf = fdf[fdf['compra_venda'].isin(filtro_operacao)]
 if filtro_onde:
 fdf = fdf[fdf['onde'].str.contains(filtro_onde, na=False, case=False)]
-st.caption("✅ Edite as células (inclui valor_investido e ticker_oficial), marque 'Excluir' para remover linhas e use os botões abaixo.")
+st.caption("Edite as células (inclui valor_investido e ticker_oficial), marque 'Excluir' para remover linhas e use os botões abaixo.")
 onde_options = sorted(list(set(df['onde'].dropna().tolist() + ["XP","Rico","Nubank","Clear","Avenue","Biscoint"])))
 fdf_view = fdf[['id','data','ticket','nome','preco','quantidade','valor_investido',
 'compra_venda','onde','tipo','country','categoria','ticker_oficial','obs']].copy()
@@ -398,7 +398,7 @@ fx_init = float(fx_auto) if pd.notna(fx_auto) else 5.00
 fx_manual = st.number_input("USD/BRL", value=fx_init, step=0.01, format="%.4f",
 disabled=not use_manual, key="fx_manual")
 usd_brl = fx_manual if use_manual else fx_auto
-✔ Compartilha FX usada com a aba Posições
+Compartilha FX usada com a aba Posições
 st.session_state['fx_in_use'] = float(usd_brl) if pd.notna(usd_brl) else np.nan
 if pd.notna(usd_brl):
 st.caption(f"USD/BRL em uso: {usd_brl:,.4f} ({'manual' if use_manual else 'yfinance'})")
@@ -486,7 +486,7 @@ df = load_df(conn)
 if df.empty:
 st.info("Sem dados ainda.")
 else:
-⚙️ Usa a FX decidida nos dashboards; se não houver, pede manual
+Usa a FX decidida nos dashboards; se não houver, pede manual
 fx_fallback = st.session_state.get('fx_in_use', np.nan)
 if pd.isna(fx_fallback):
 fx_fallback = st.number_input("USD/BRL para cálculo das posições (fallback)", value=5.00, step=0.01, format="%.4f")
