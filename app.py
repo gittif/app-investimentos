@@ -1,10 +1,10 @@
-# app.py — v3.6.3
+# app.py — v3.6.4
 # Ajustes:
+# - Adicionado gráficos de pizza nos Dashboards para alocação por corretora e por país.
 # - Dashboards grava a FX usada em st.session_state['fx_in_use'].
 # - Posições usa a mesma FX (ou pede manual se não houver).
 # - build_positions aceita fallback_fx para conversão USD→BRL.
 # - Mantém ticker_oficial com prioridade p/ preços (yfinance).
-
 import os
 import sqlite3
 from datetime import datetime
@@ -14,11 +14,11 @@ import streamlit as st
 import yfinance as yf
 import matplotlib.pyplot as plt
 
-DB_PATH   = "invest.db"
+DB_PATH = "invest.db"
 SEED_PATH = "seed_investimentos.csv"
 REQUIRE_PIN = os.getenv("APP_PIN", "1234")
 
-st.set_page_config(page_title="Controle de Investimentos – v3.6.3", page_icon="📊", layout="wide")
+st.set_page_config(page_title="Controle de Investimentos – v3.6.4", page_icon="📊", layout="wide")
 
 # ---------------------- Auth ----------------------
 if "authed" not in st.session_state:
@@ -80,7 +80,7 @@ def seed_if_empty(conn):
             if c not in df.columns: df[c] = np.nan
         df['data'] = pd.to_datetime(df['data'], errors='coerce')
         df['month'] = df['data'].dt.month
-        df['year']  = df['data'].dt.year
+        df['year'] = df['data'].dt.year
         df = df.sort_values('data')
         df.to_sql('movimentos', conn, if_exists='append', index=False)
 
@@ -92,7 +92,7 @@ def load_df(conn):
 
 def insert_movimento(conn, row: dict):
     conn.execute("""
-        INSERT INTO movimentos 
+        INSERT INTO movimentos
         (data, ticket, nome, preco, quantidade, valor_investido, compra_venda, onde, tipo, obs, country, categoria, month, year, ticker_oficial)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
@@ -186,46 +186,36 @@ def fetch_prices(tickers_unique):
 def build_positions(df: pd.DataFrame, fallback_fx=np.nan):
     if df.empty:
         return pd.DataFrame(), np.nan
-
     tmp = df.copy()
     tmp['ticker_fetch'] = tmp.apply(pick_fetch_symbol, axis=1)
     tmp['qtd_signed'] = np.where(tmp['compra_venda']=='Venda', -tmp['quantidade'], tmp['quantidade'])
-
     agg = tmp.groupby(['ticket','country'], dropna=False).agg(
         qtd_total=('qtd_signed','sum'),
         aporte=('valor_investido','sum')
     ).reset_index()
-
     compras = tmp[tmp['compra_venda'] == 'Compra'].groupby('ticket').apply(
         lambda g: (g['preco'] * g['quantidade']).sum() / max(g['quantidade'].sum(), 1e-9)
     ).rename('preco_medio').reset_index()
     positions = agg.merge(compras, on='ticket', how='left')
-
     fetch_map = tmp.drop_duplicates('ticket')[['ticket','ticker_fetch']]
     positions = positions.merge(fetch_map, on='ticket', how='left')
-
     tickers_unique = positions['ticker_fetch'].dropna().unique().tolist()
     price_map, usd_brl_auto = fetch_prices(tickers_unique)
-
     positions['preco_atual'] = positions['ticker_fetch'].map(price_map)
     positions['moeda'] = np.where(positions['country'].str.lower().eq('brasil'), 'BRL',
                           np.where(positions['country'].str.lower().eq('crypto'), 'USD', 'USD'))
     positions['valor_atual_moeda'] = positions['preco_atual'] * positions['qtd_total']
-
     # FX a usar: yfinance; se não vier, cai para fallback
     usd_brl = usd_brl_auto
     if pd.isna(usd_brl) and pd.notna(fallback_fx):
         usd_brl = float(fallback_fx)
-
     def to_brl(row):
         if row['moeda'] == 'USD' and pd.notna(row['valor_atual_moeda']) and pd.notna(usd_brl):
             return row['valor_atual_moeda'] * usd_brl
         return row['valor_atual_moeda']
-
     positions['valor_atual_brl'] = positions.apply(to_brl, axis=1)
     positions['pnl_brl'] = positions['valor_atual_brl'] - positions['aporte']
     positions['pnl_pct'] = np.where(positions['aporte'] != 0, positions['pnl_brl'] / positions['aporte'], np.nan)
-
     positions = positions.sort_values('valor_atual_brl', ascending=False)
     return positions, usd_brl
 
@@ -235,7 +225,7 @@ create_table(conn)
 ensure_column_ticker_oficial(conn)
 seed_if_empty(conn)
 
-st.title("Controle de Investimentos – v3.6.3")
+st.title("Controle de Investimentos – v3.6.4")
 
 tab1, tab2, tab3, tab4 = st.tabs(["➕ Novo", "📋 Movimentos", "📊 Dashboards", "📦 Posições"])
 
@@ -257,7 +247,6 @@ with tab1:
         categoria = st.text_input("Categoria (ex: RV, RF, FII, ETF)", value="RV", key="novo_cat")
         obs = st.text_area("Observações", key="novo_obs")
     ticker_oficial = st.text_input("ticker_oficial (opcional, ex.: XPML11.SA, VOO, BTC-USD)", key="novo_tkoff")
-
     if st.button("Salvar", key="novo_salvar"):
         valor_investido = float(preco) * float(quantidade)
         if compra_venda == "Venda":
@@ -278,8 +267,7 @@ with tab1:
             "ticker_oficial": ticker_oficial.strip() if ticker_oficial else None
         }
         row["month"] = pd.to_datetime(row["data"]).month
-        row["year"]  = pd.to_datetime(row["data"]).year
-
+        row["year"] = pd.to_datetime(row["data"]).year
         if row["ticket"] == "" or row["preco"] <= 0 or row["quantidade"] <= 0:
             st.error("Preencha Ticker, Preço (> 0) e Quantidade (> 0).")
         else:
@@ -290,7 +278,6 @@ with tab1:
 with tab2:
     st.subheader("Histórico de movimentos")
     df = load_df(conn)
-
     c1, c2, c3, c4 = st.columns(4)
     with c1:
         filtro_ticket = st.text_input("Filtrar por Ticker", key="flt_ticker")
@@ -300,7 +287,6 @@ with tab2:
         filtro_operacao = st.multiselect("Operação", ["Compra","Venda"], key="flt_op")
     with c4:
         filtro_onde = st.text_input("Filtrar por 'Onde'", key="flt_onde")
-
     fdf = df.copy()
     if filtro_ticket:
         fdf = fdf[fdf['ticket'].str.contains(filtro_ticket.strip().upper(), na=False)]
@@ -310,15 +296,11 @@ with tab2:
         fdf = fdf[fdf['compra_venda'].isin(filtro_operacao)]
     if filtro_onde:
         fdf = fdf[fdf['onde'].str.contains(filtro_onde, na=False, case=False)]
-
     st.caption("✅ Edite as células (inclui **valor_investido** e **ticker_oficial**), marque 'Excluir' para remover linhas e use os botões abaixo.")
-
     onde_options = sorted(list(set(df['onde'].dropna().tolist() + ["XP","Rico","Nubank","Clear","Avenue","Biscoint"])))
-
     fdf_view = fdf[['id','data','ticket','nome','preco','quantidade','valor_investido',
                     'compra_venda','onde','tipo','country','categoria','ticker_oficial','obs']].copy()
     fdf_view.insert(1, "excluir", False)
-
     edited = st.data_editor(
         fdf_view,
         num_rows="fixed",
@@ -338,7 +320,6 @@ with tab2:
         use_container_width=True,
         key="mov_editor"
     )
-
     def to_float_safe(x):
         if x is None:
             return np.nan
@@ -351,7 +332,6 @@ with tab2:
             except Exception:
                 return np.nan
         return np.nan
-
     colA, colB, colC = st.columns([1,1,2])
     with colA:
         if st.button("💾 Salvar alterações", key="btn_save_inline"):
@@ -372,25 +352,22 @@ with tab2:
                     changed = (pd.isna(new_val) != pd.isna(old_val)) or (str(new_val) != str(old_val))
                     if changed:
                         updates[col] = new_val
-
                 changed_inputs = any(k in updates for k in ['preco','quantidade','compra_venda'])
                 gave_value = ('valor_investido' in updates) and (not pd.isna(to_float_safe(updates['valor_investido'])))
                 if changed_inputs and not gave_value:
                     preco = to_float_safe(updates.get('preco', row['preco']))
-                    qtd   = to_float_safe(updates.get('quantidade', row['quantidade']))
-                    oper  = updates.get('compra_venda', row['compra_venda'])
+                    qtd = to_float_safe(updates.get('quantidade', row['quantidade']))
+                    oper = updates.get('compra_venda', row['compra_venda'])
                     if pd.isna(preco): preco = 0.0
-                    if pd.isna(qtd):   qtd   = 0.0
+                    if pd.isna(qtd): qtd = 0.0
                     val = preco * qtd
                     if oper == 'Venda':
                         val = -val
                     updates['valor_investido'] = float(val)
-
                 if 'data' in updates:
                     dt = pd.to_datetime(updates['data'])
                     updates['month'] = int(dt.month)
-                    updates['year']  = int(dt.year)
-
+                    updates['year'] = int(dt.year)
                 if updates:
                     for num_col in ['preco','quantidade','valor_investido']:
                         if num_col in updates and updates[num_col] is not None and not pd.isna(updates[num_col]):
@@ -398,7 +375,6 @@ with tab2:
                     update_movimento(conn, int(row['id']), updates)
             st.success("Alterações salvas.")
             st.rerun()
-
     with colB:
         ids_excluir = edited.loc[edited['excluir']==True, 'id'].dropna().astype(int).tolist()
         if st.button(f"🗑️ Excluir selecionados ({len(ids_excluir)})", disabled=(len(ids_excluir)==0), key="btn_delete"):
@@ -406,13 +382,11 @@ with tab2:
                 delete_movimento(conn, rid)
             st.warning(f"{len(ids_excluir)} linha(s) excluída(s).")
             st.rerun()
-
     with colC:
         if st.button("☑️ Marcar/Desmarcar todos visíveis", key="btn_toggle_all"):
             edited['excluir'] = ~edited['excluir'].astype(bool)
             st.session_state['mov_editor'] = edited
             st.rerun()
-
     with st.expander("Edição em massa de 'onde' (aplica no filtro atual)"):
         novo_onde = st.selectbox("Definir 'onde' para TODAS as linhas filtradas:", options=onde_options, key="mass_onde")
         if st.button("Aplicar 'onde' nas linhas filtradas", key="btn_apply_onde"):
@@ -420,7 +394,6 @@ with tab2:
                 update_movimento(conn, int(rid), {"onde": novo_onde})
             st.success(f"'onde' atualizado em {len(fdf)} linha(s).")
             st.rerun()
-
     exp1, exp2 = st.columns(2)
     with exp1:
         st.download_button(
@@ -444,7 +417,6 @@ with tab3:
     else:
         ddf = df.copy()
         ddf['country_norm'] = ddf['country'].apply(norm_country)
-
         fx_auto = get_usd_brl()
         col_fx1, col_fx2 = st.columns([1,2])
         with col_fx1:
@@ -456,15 +428,12 @@ with tab3:
             fx_manual = st.number_input("USD/BRL", value=fx_init, step=0.01, format="%.4f",
                                         disabled=not use_manual, key="fx_manual")
         usd_brl = fx_manual if use_manual else fx_auto
-
         # ✔ Compartilha FX usada com a aba Posições
         st.session_state['fx_in_use'] = float(usd_brl) if pd.notna(usd_brl) else np.nan
-
         if pd.notna(usd_brl):
             st.caption(f"USD/BRL em uso: {usd_brl:,.4f} ({'manual' if use_manual else 'yfinance'})")
         else:
             st.caption("USD/BRL indisponível no momento (defina manualmente para converter os valores de USA).")
-
         def split_values(row):
             country = row['country_norm']
             val = float(row['valor_investido']) if pd.notna(row['valor_investido']) else 0.0
@@ -473,12 +442,9 @@ with tab3:
                 return pd.Series({'valor_local': val, 'moeda_local': 'USD', 'valor_brl': brl})
             else:
                 return pd.Series({'valor_local': val, 'moeda_local': 'BRL', 'valor_brl': val})
-
         ddf = pd.concat([ddf, ddf.apply(split_values, axis=1)], axis=1)
-
         total_investido_brl = ddf['valor_brl'].sum(skipna=True)
         st.metric("Valor total investido (BRL)", f"{total_investido_brl:,.2f}")
-
         st.markdown("### Por corretora/plataforma (com conversão)")
         by_onde_brl = ddf.groupby('onde', dropna=False)['valor_brl'].sum(min_count=1).reset_index().rename(columns={'valor_brl':'Aporte (BRL)'})
         predominante = ddf.groupby(['onde','moeda_local'])['valor_local'].sum(min_count=1).reset_index()
@@ -489,7 +455,15 @@ with tab3:
         table_onde = table_onde.rename(columns={'moeda_local':'Moeda Local (predominante)'})
         table_onde = table_onde.sort_values('Aporte (BRL)', ascending=False, na_position='last')
         st.dataframe(table_onde, use_container_width=True)
-
+        # Novo: Gráfico de pizza por corretora
+        st.markdown("### Alocação por Corretora (BRL)")
+        if not table_onde.empty and table_onde['Aporte (BRL)'].sum() > 0:
+            fig_onde, ax_onde = plt.subplots(figsize=(6, 6))
+            ax_onde.pie(table_onde['Aporte (BRL)'], labels=table_onde['onde'], autopct='%1.1f%%', startangle=90)
+            ax_onde.axis('equal')
+            st.pyplot(fig_onde)
+        else:
+            st.info("Sem dados para gráfico.")
         st.markdown("### Por país (Local vs BRL)")
         by_country = ddf.groupby('country_norm').agg(
             aporte_local=('valor_local','sum'),
@@ -498,7 +472,15 @@ with tab3:
         ).reset_index().rename(columns={'country_norm':'País','aporte_local':'Aporte (Local)','aporte_brl':'Aporte (BRL)','moeda':'Moeda'})
         by_country = by_country.sort_values('Aporte (BRL)', ascending=False, na_position='last')
         st.dataframe(by_country, use_container_width=True)
-
+        # Novo: Gráfico de pizza por país
+        st.markdown("### Alocação por País (BRL)")
+        if not by_country.empty and by_country['Aporte (BRL)'].sum() > 0:
+            fig_country, ax_country = plt.subplots(figsize=(6, 6))
+            ax_country.pie(by_country['Aporte (BRL)'], labels=by_country['País'], autopct='%1.1f%%', startangle=90)
+            ax_country.axis('equal')
+            st.pyplot(fig_country)
+        else:
+            st.info("Sem dados para gráfico.")
         st.markdown("---")
         st.markdown("### Preços atuais (yfinance) e comparação com preço médio")
         pos_tmp, usd_brl_tmp = build_positions(df, fallback_fx=st.session_state.get('fx_in_use', np.nan))
@@ -520,16 +502,13 @@ with tab4:
         if pd.isna(fx_fallback):
             fx_fallback = st.number_input("USD/BRL para cálculo das posições (fallback)", value=5.00, step=0.01, format="%.4f")
         pos, usd_brl_used = build_positions(df, fallback_fx=fx_fallback)
-
         if isinstance(pos, pd.DataFrame) and not pos.empty:
             k1, k2 = st.columns(2)
             k1.metric("Valor total (BRL)", f"{pos['valor_atual_brl'].sum(skipna=True):,.2f}")
             if pd.notna(usd_brl_used):
                 k2.metric("USD/BRL usado", f"{usd_brl_used:,.4f}")
-
             show_cols = ['ticket','qtd_total','preco_medio','preco_atual','valor_atual_brl','aporte','pnl_brl','pnl_pct','country']
             st.dataframe(pos[show_cols], use_container_width=True)
-
             top = pos.sort_values('pnl_brl', ascending=False).head(10)
             fig1, ax1 = plt.subplots(figsize=(6,3))
             ax1.barh(top['ticket'], top['pnl_brl'])
