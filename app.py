@@ -1,9 +1,8 @@
-# app.py — v3.6.5
-# Melhorias:
-# - Corrige erros de sintaxe (separadores e comentários).
-# - Dashboards com gráficos menores (figsize menor).
-# - Nova tabela e gráfico: alocação por "tipo" (com conversão).
-# - Mantém ticker_oficial para buscar preços no yfinance.
+# app.py — v3.6.6
+# Melhorias focadas na aba Movimentos:
+# - Exclusão de linhas passa a ser 100% permanente no banco (delete direto no SQLite).
+# - Edição continua salvando no banco ao clicar em "Salvar alterações".
+# - Demais recursos mantidos (Dashboards, Posições, ticker_oficial, etc.).
 
 import os
 import sqlite3
@@ -21,7 +20,7 @@ SEED_PATH = "seed_investimentos.csv"
 REQUIRE_PIN = os.getenv("APP_PIN", "1234")
 
 st.set_page_config(
-    page_title="Controle de Investimentos – v3.6.5",
+    page_title="Controle de Investimentos – v3.6.6",
     page_icon="📊",
     layout="wide",
 )
@@ -330,7 +329,7 @@ create_table(conn)
 ensure_column_ticker_oficial(conn)
 seed_if_empty(conn)
 
-st.title("Controle de Investimentos – v3.6.5")
+st.title("Controle de Investimentos – v3.6.6")
 
 tab1, tab2, tab3, tab4 = st.tabs(
     ["➕ Novo", "📋 Movimentos", "📊 Dashboards", "📦 Posições"]
@@ -460,7 +459,7 @@ with tab2:
         fdf_view,
         num_rows="fixed",
         hide_index=True,
-        column_config={
+        column_config={  
             "id": st.column_config.NumberColumn("id", disabled=True),
             "excluir": st.column_config.CheckboxColumn("Excluir"),
             "data": st.column_config.DateColumn("data"),
